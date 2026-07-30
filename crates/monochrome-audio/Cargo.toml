@@ -12,7 +12,7 @@ tracing = { workspace = true }
 serde_json = { workspace = true }
 aes = "0.9"
 ctr = "0.10"
-symphonia = { version = "0.5", features = ["all-codecs", "all-formats"] }
+symphonia = { version = "0.6", features = ["all-codecs", "all-formats"] }
 cpal = "0.18"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "blocking"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

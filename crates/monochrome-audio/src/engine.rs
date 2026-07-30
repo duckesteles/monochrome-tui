@@ -6,13 +6,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
+use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 
 const RING_SECONDS: f32 = 4.0;
@@ -267,7 +266,7 @@ impl Playback {
 
 struct Playback {
     format: Box<dyn FormatReader>,
-    decoder: Box<dyn symphonia::core::codecs::Decoder>,
+    decoder: Box<dyn AudioDecoder>,
     track_id: u32,
     source_rate: u32,
     source_channels: usize,
@@ -333,16 +332,13 @@ fn read_error_body(backend: &HttpRange) -> Option<String> {
     source::summarise(&body)
 }
 
-fn prepare(stream: MediaSourceStream, hint: Hint) -> Result<Playback, String> {
-    let probed = symphonia::default::get_probe()
-        .format(
+fn prepare(stream: MediaSourceStream<'static>, hint: Hint) -> Result<Playback, String> {
+    let format = symphonia::default::get_probe()
+        .probe(
             &hint,
             stream,
-            &FormatOptions {
-                enable_gapless: true,
-                ..Default::default()
-            },
-            &MetadataOptions::default(),
+            FormatOptions::default(),
+            MetadataOptions::default(),
         )
         .map_err(|error| {
             tracing::debug!(%error, "the probe could not identify the stream");
@@ -351,25 +347,30 @@ fn prepare(stream: MediaSourceStream, hint: Hint) -> Result<Playback, String> {
                 .to_string()
         })?;
 
-    let format = probed.format;
     let track = format
-        .tracks()
-        .iter()
-        .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .default_track(TrackType::Audio)
         .ok_or_else(|| "the stream carries no audio track".to_string())?;
 
     let track_id = track.id;
-    let parameters = track.codec_params.clone();
+    let frames = track.num_frames;
+    let parameters = track
+        .codec_params
+        .as_ref()
+        .and_then(|params| params.audio())
+        .ok_or_else(|| "the stream carries no audio track".to_string())?
+        .clone();
+
     let decoder = symphonia::default::get_codecs()
-        .make(&parameters, &DecoderOptions::default())
+        .make_audio_decoder(&parameters, &AudioDecoderOptions::default())
         .map_err(|error| format!("no decoder for this stream: {error}"))?;
 
     let source_rate = parameters.sample_rate.unwrap_or(FALLBACK_RATE);
     let source_channels = parameters
         .channels
+        .as_ref()
         .map(|channels| channels.count())
         .unwrap_or(FALLBACK_CHANNELS);
-    let duration = match (parameters.n_frames, parameters.sample_rate) {
+    let duration = match (frames, parameters.sample_rate) {
         (Some(frames), Some(rate)) if rate > 0 => Some(frames as f64 / rate as f64),
         _ => None,
     };
@@ -390,7 +391,7 @@ fn prepare(stream: MediaSourceStream, hint: Hint) -> Result<Playback, String> {
 fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) {
     let mut output: Option<Output> = None;
     let mut playback: Option<Playback> = None;
-    let mut sample_buffer: Option<SampleBuffer<f32>> = None;
+    let mut interleaved: Vec<f32> = Vec::new();
     let mut mapped: Vec<f32> = Vec::new();
     let mut resampled: Vec<f32> = Vec::new();
     let mut pending: Vec<f32> = Vec::new();
@@ -414,7 +415,7 @@ fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) 
                     shared.ring.clear();
                     shared.frames.store(0, Ordering::Relaxed);
                     pending.clear();
-                    sample_buffer = None;
+                    interleaved.clear();
                     seek_offset = 0.0;
                     last_reported = f64::MIN;
                     current = Some((*request).clone());
@@ -519,7 +520,7 @@ fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) 
                         shared.ring.clear();
                         shared.frames.store(0, Ordering::Relaxed);
                         pending.clear();
-                        sample_buffer = None;
+                        interleaved.clear();
                         seek_offset = seconds;
                         last_reported = f64::MIN;
                     }
@@ -544,7 +545,7 @@ fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) 
                 match decode_block(
                     active,
                     device.channels,
-                    &mut sample_buffer,
+                    &mut interleaved,
                     &mut mapped,
                     &mut resampled,
                 ) {
@@ -594,8 +595,13 @@ fn reached_the_end(finished: bool, pending_empty: bool, ring_empty: bool) -> boo
 }
 
 fn seek_within(playback: &mut Playback, seconds: f64) -> bool {
+    let whole = seconds.max(0.0).trunc();
+    let nanos = ((seconds.max(0.0) - whole) * 1e9) as u32;
+    let Some(time) = Time::try_new(whole as i64, nanos.min(999_999_999)) else {
+        return false;
+    };
     let target = SeekTo::Time {
-        time: Time::from(seconds),
+        time,
         track_id: Some(playback.track_id),
     };
     match playback.format.seek(SeekMode::Accurate, target) {
@@ -636,14 +642,15 @@ fn rebuild_if_needed(
 fn decode_block<'a>(
     playback: &mut Playback,
     output_channels: usize,
-    sample_buffer: &mut Option<SampleBuffer<f32>>,
+    interleaved: &mut Vec<f32>,
     mapped: &'a mut Vec<f32>,
     resampled: &'a mut Vec<f32>,
 ) -> Result<Option<&'a [f32]>, String> {
     let packet = loop {
         match playback.format.next_packet() {
-            Ok(packet) if packet.track_id() == playback.track_id => break packet,
-            Ok(_) => continue,
+            Ok(Some(packet)) if packet.track_id == playback.track_id => break packet,
+            Ok(Some(_)) => continue,
+            Ok(None) => return Ok(None),
             Err(SymphoniaError::IoError(error))
                 if error.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
@@ -666,14 +673,11 @@ fn decode_block<'a>(
         Err(error) => return Err(format!("decoding failed: {error}")),
     };
 
-    let spec = *decoded.spec();
-    let buffer = sample_buffer
-        .get_or_insert_with(|| SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
-    buffer.copy_interleaved_ref(decoded);
+    decoded.copy_to_vec_interleaved(interleaved);
 
     mapped.clear();
     map_channels(
-        buffer.samples(),
+        interleaved,
         playback.source_channels,
         output_channels,
         mapped,
@@ -694,10 +698,11 @@ fn codec_name(playback: &Playback) -> String {
         .tracks()
         .iter()
         .find(|track| track.id == playback.track_id)
-        .and_then(|track| {
+        .and_then(|track| track.codec_params.as_ref()?.audio())
+        .and_then(|params| {
             symphonia::default::get_codecs()
-                .get_codec(track.codec_params.codec)
-                .map(|descriptor| descriptor.short_name.to_string())
+                .get_audio_decoder(params.codec)
+                .map(|entry| entry.codec.info.short_name.to_string())
         })
         .unwrap_or_else(|| "audio".into())
 }
@@ -846,7 +851,7 @@ mod decode_tests {
     }
 
     fn drain(playback: &mut Playback, output_channels: usize) -> Vec<f32> {
-        let mut buffer = None;
+        let mut buffer = Vec::new();
         let mut mapped = Vec::new();
         let mut resampled = Vec::new();
         let mut collected = Vec::new();
@@ -960,14 +965,14 @@ mod decode_tests {
         let frames: Vec<[i16; 2]> = (0..44_100).map(|i| [(i % 1000) as i16, 0]).collect();
         let mut playback = playback_of(wav(44_100, 2, &frames), 44_100, 2);
         let target = SeekTo::Time {
-            time: Time::from(0.5),
+            time: Time::try_new(0, 500_000_000).expect("half a second"),
             track_id: Some(playback.track_id),
         };
         let seeked = playback
             .format
             .seek(SeekMode::Accurate, target)
             .expect("seek succeeds");
-        let drift = (seeked.actual_ts as i64 - 22_050).abs();
+        let drift = (seeked.actual_ts.get() - 22_050).abs();
         assert!(drift <= 2_048, "seek landed {drift} frames from the target");
         let remaining = drain(&mut playback, 2).len() / 2;
         assert!(
