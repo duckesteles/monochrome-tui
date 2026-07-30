@@ -22,7 +22,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
-toml = "0.8"
+toml = "1.1"
 dirs = "6"
 keyring = { version = "3", default-features = false, features = ["async-secret-service", "crypto-rust", "tokio"] }
 clap = { version = "4", features = ["derive"] }
