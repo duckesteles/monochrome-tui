@@ -306,7 +306,7 @@ impl Catalog {
             .data
             .items
             .into_iter()
-            .map(|entry| entry.into_track().into_core())
+            .filter_map(|entry| entry.into_track().map(WireTrack::into_core))
             .collect())
     }
 
@@ -329,8 +329,8 @@ pub struct RecommendationItem {
 }
 
 impl RecommendationItem {
-    fn into_track(self) -> WireTrack {
-        self.track.or(self.inline).expect("recommendation track")
+    fn into_track(self) -> Option<WireTrack> {
+        self.track.or(self.inline)
     }
 }
 
@@ -398,6 +398,25 @@ mod tests {
         let eligible = catalog.ordered(Some(2.4));
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].1.url, "https://new.example");
+    }
+
+    #[test]
+    fn a_recommendation_the_server_did_not_fill_in_is_skipped_not_fatal() {
+        let wrapped: RecommendationItem =
+            serde_json::from_str(r#"{"track":{"id":7,"title":"Rec","duration":90}}"#)
+                .expect("parses");
+        assert_eq!(wrapped.into_track().map(|track| track.id), Some(7));
+
+        let inline: RecommendationItem =
+            serde_json::from_str(r#"{"id":9,"title":"Rec","duration":90}"#).expect("parses");
+        assert_eq!(inline.into_track().map(|track| track.id), Some(9));
+
+        let empty: RecommendationItem = serde_json::from_str(r#"{"note":"nothing here"}"#)
+            .expect("an unexpected shape must still parse");
+        assert!(
+            empty.into_track().is_none(),
+            "a malformed entry must be skipped rather than crash the client"
+        );
     }
 
     #[test]

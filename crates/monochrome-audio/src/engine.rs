@@ -271,6 +271,7 @@ struct Playback {
     duration: Option<f64>,
     resampler: LinearResampler,
     finished: bool,
+    failed: bool,
 }
 
 fn open(request: &PlayRequest, output: &Output) -> Result<Playback, String> {
@@ -386,6 +387,7 @@ fn prepare(
         duration,
         resampler: LinearResampler::new(source_rate, output_rate, output_channels),
         finished: false,
+        failed: false,
     })
 }
 
@@ -566,6 +568,7 @@ fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) 
                     }
                     Err(error) => {
                         active.finished = true;
+                        active.failed = true;
                         let _ = events.send(Event::Failed(error));
                     }
                 }
@@ -578,10 +581,13 @@ fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) 
                 let _ = events.send(Event::Position(position));
             }
 
-            if active.finished && pending.is_empty() && shared.ring.is_empty() {
+            if reached_the_end(active.finished, pending.is_empty(), shared.ring.is_empty()) {
                 shared.playing.store(false, Ordering::Relaxed);
+                let ended_cleanly = !active.failed;
                 playback = None;
-                let _ = events.send(Event::Finished);
+                if ended_cleanly {
+                    let _ = events.send(Event::Finished);
+                }
             }
         }
 
@@ -589,6 +595,10 @@ fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) 
             std::thread::sleep(IDLE_SLEEP);
         }
     }
+}
+
+fn reached_the_end(finished: bool, pending_empty: bool, ring_empty: bool) -> bool {
+    finished && pending_empty && ring_empty
 }
 
 fn seek_within(playback: &mut Playback, seconds: f64) -> bool {
@@ -722,6 +732,32 @@ mod tests {
     }
 
     #[test]
+    fn a_track_is_only_finished_once_everything_buffered_has_been_heard() {
+        assert!(!reached_the_end(false, true, true));
+        assert!(!reached_the_end(true, false, true));
+        assert!(!reached_the_end(true, true, false));
+        assert!(reached_the_end(true, true, true));
+    }
+
+    #[test]
+    fn a_stream_that_failed_is_not_also_reported_as_finished() {
+        let frames: Vec<[i16; 2]> = (0..64).map(|i| [i as i16, 0]).collect();
+        let mut playback =
+            decode_tests::playback_of(decode_tests::wav(44_100, 2, &frames), 44_100, 2);
+        playback.finished = true;
+        playback.failed = true;
+
+        assert!(
+            reached_the_end(playback.finished, true, true),
+            "the track has stopped producing audio"
+        );
+        assert!(
+            playback.failed,
+            "a failed track must not be announced as a clean finish, or the queue advances"
+        );
+    }
+
+    #[test]
     fn volume_is_clamped_into_range() {
         let (player, _events) = Player::spawn();
         player.set_volume(4.0);
@@ -781,7 +817,7 @@ mod decode_tests {
     use super::*;
     use crate::source::{MemoryRange, RangeSource};
 
-    fn wav(sample_rate: u32, channels: u16, frames: &[[i16; 2]]) -> Vec<u8> {
+    pub(super) fn wav(sample_rate: u32, channels: u16, frames: &[[i16; 2]]) -> Vec<u8> {
         let bytes_per_frame = 2 * channels as u32;
         let data_len = frames.len() as u32 * bytes_per_frame;
         let mut out = Vec::with_capacity(44 + data_len as usize);
@@ -805,7 +841,11 @@ mod decode_tests {
         out
     }
 
-    fn playback_of(bytes: Vec<u8>, output_rate: u32, output_channels: usize) -> Playback {
+    pub(super) fn playback_of(
+        bytes: Vec<u8>,
+        output_rate: u32,
+        output_channels: usize,
+    ) -> Playback {
         let source = RangeSource::new(Box::new(MemoryRange::new(bytes, true)));
         let stream = MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default());
         prepare(stream, output_rate, output_channels, Hint::new()).expect("stream is playable")

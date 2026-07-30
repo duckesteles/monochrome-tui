@@ -42,6 +42,14 @@ pub fn create_private_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn discard(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("cannot remove {}", path.display())),
+    }
+}
+
 pub fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         create_private_dir(parent)?;
@@ -155,6 +163,22 @@ mod tests {
             .mode();
         assert_eq!(mode & 0o777, 0o700, "mode was {:o}", mode & 0o777);
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn discarding_removes_the_file() {
+        let path = scratch("discard");
+        write_private(&path, b"a library and a listening history").expect("write");
+        assert!(path.exists());
+        discard(&path).expect("discard");
+        assert!(!path.exists(), "signing out must leave nothing behind");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn discarding_something_that_is_already_gone_is_not_an_error() {
+        let path = scratch("absent");
+        assert!(discard(&path).is_ok());
     }
 
     #[test]

@@ -191,7 +191,6 @@ fn non_empty(value: &str) -> Option<String> {
 pub struct Paths {
     pub config: PathBuf,
     pub snapshot: PathBuf,
-    pub pending: PathBuf,
     pub log_dir: PathBuf,
 }
 
@@ -207,7 +206,6 @@ impl Paths {
         Ok(Self {
             config: config_dir.join("config.toml"),
             snapshot: state_dir.join("snapshot.json"),
-            pending: state_dir.join("pending.json"),
             log_dir: state_dir.clone(),
         })
     }

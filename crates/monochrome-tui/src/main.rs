@@ -659,9 +659,13 @@ async fn run(paths: Paths) -> Result<()> {
                         _ => {}
                     }
                     let arrived_from_server = matches!(message, Message::Sync(_));
+                    let signed_out = matches!(message, Message::SignedOut);
                     let effects = app.apply(message);
                     if arrived_from_server {
                         save_snapshot(&app, &paths);
+                    }
+                    if signed_out {
+                        forget_everything_local(&services, &paths);
                     }
                     effects
                 }
@@ -1048,6 +1052,12 @@ fn load_snapshot(paths: &Paths) -> monochrome_core::SyncDocument {
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default()
+}
+
+fn forget_everything_local(services: &Arc<Services>, paths: &Paths) {
+    let _ = monochrome_tui::paths::discard(&paths.snapshot);
+    services.secrets.clear(SESSION_TOKEN);
+    services.secrets.clear(AMAZON_JWT);
 }
 
 fn save_snapshot(app: &App, paths: &Paths) {

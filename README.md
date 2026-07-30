@@ -114,7 +114,7 @@ Nothing you listen to is kept. The track currently playing is buffered to a
 file so seeking is instant; that file is unlinked the moment it is opened, so
 it never appears in the directory, and the space is released when you move to
 the next track. One track at a time, around 15 MB for a four minute lossless
-song. Sign out and the library snapshot is cleared.
+song. Signing out deletes the snapshot and both stored tokens.
 
 ## Configuration
 
