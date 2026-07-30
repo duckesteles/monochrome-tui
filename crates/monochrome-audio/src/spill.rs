@@ -161,10 +161,28 @@ impl Drop for Spill {
     }
 }
 
+pub fn pick_scratch_dir(
+    cache: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+    temp: std::path::PathBuf,
+) -> std::path::PathBuf {
+    cache
+        .or_else(|| home.map(|home| home.join(".cache")))
+        .map(|base| base.join("monochrome-tui"))
+        .unwrap_or(temp)
+}
+
+fn scratch_dir() -> std::path::PathBuf {
+    pick_scratch_dir(
+        std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from),
+        std::env::var_os("HOME").map(std::path::PathBuf::from),
+        std::env::temp_dir(),
+    )
+}
+
 fn scratch_file() -> IoResult<File> {
-    let directory = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
+    let directory = scratch_dir();
+    let _ = std::fs::create_dir_all(&directory);
 
     for attempt in 0..64u32 {
         let path = directory.join(format!("monochrome-{}-{attempt}.audio", std::process::id()));
@@ -303,6 +321,35 @@ mod tests {
     }
 
     #[test]
+    fn the_scratch_file_goes_to_real_storage_not_a_memory_backed_directory() {
+        use std::path::PathBuf;
+
+        let chosen = pick_scratch_dir(
+            Some(PathBuf::from("/home/someone/.cache")),
+            Some(PathBuf::from("/home/someone")),
+            PathBuf::from("/tmp"),
+        );
+        assert_eq!(chosen, PathBuf::from("/home/someone/.cache/monochrome-tui"));
+
+        let without_cache_variable = pick_scratch_dir(
+            None,
+            Some(PathBuf::from("/home/someone")),
+            PathBuf::from("/tmp"),
+        );
+        assert_eq!(
+            without_cache_variable,
+            PathBuf::from("/home/someone/.cache/monochrome-tui")
+        );
+
+        let nothing_else = pick_scratch_dir(None, None, PathBuf::from("/tmp"));
+        assert_eq!(
+            nothing_else,
+            PathBuf::from("/tmp"),
+            "the temporary directory is the last resort, not the first choice"
+        );
+    }
+
+    #[test]
     fn dropping_the_buffer_stops_the_fetch_it_started() {
         let counter = Arc::new(AtomicU64::new(0));
         let source = CountingSource {
@@ -346,9 +393,7 @@ mod tests {
     #[test]
     fn the_scratch_file_is_not_left_on_disk() {
         let spill = settled(data(16));
-        let directory = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
+        let directory = scratch_dir();
         let leftovers: Vec<_> = std::fs::read_dir(&directory)
             .expect("listing")
             .filter_map(Result::ok)

@@ -8,6 +8,9 @@ type Cipher = ctr::Ctr64BE<Aes128>;
 
 const FLAC_MAGIC: &[u8; 4] = b"fLaC";
 const MAX_BOX: usize = 8 * 1024 * 1024;
+const MAX_SAMPLE: usize = 16 * 1024 * 1024;
+const MAX_SAMPLES_PER_FRAGMENT: usize = 65_536;
+const MAX_NESTING: usize = 16;
 const IV_SIZE: usize = 8;
 
 pub fn parse_key(hex: &str) -> Option<[u8; 16]> {
@@ -149,7 +152,10 @@ impl<R: Read> FlacFromCenc<R> {
             return Ok(());
         };
 
-        let size = sample.size.min(self.mdat_remaining as usize);
+        let size = sample
+            .size
+            .min(self.mdat_remaining as usize)
+            .min(MAX_SAMPLE);
         if size == 0 {
             self.mdat_remaining = 0;
             return Ok(());
@@ -230,6 +236,13 @@ impl<R: Read + Send + Sync> MediaSource for FlacFromCenc<R> {
 }
 
 pub fn find_box<'a>(data: &'a [u8], wanted: &[u8; 4]) -> Option<&'a [u8]> {
+    find_box_within(data, wanted, MAX_NESTING)
+}
+
+fn find_box_within<'a>(data: &'a [u8], wanted: &[u8; 4], depth: usize) -> Option<&'a [u8]> {
+    if depth == 0 {
+        return None;
+    }
     let mut offset = 0usize;
     while offset + 8 <= data.len() {
         let size = u32::from_be_bytes([
@@ -252,7 +265,7 @@ pub fn find_box<'a>(data: &'a [u8], wanted: &[u8; 4]) -> Option<&'a [u8]> {
             return Some(body);
         }
         if is_container(&kind)
-            && let Some(inner) = find_box(body, wanted)
+            && let Some(inner) = find_box_within(body, wanted, depth - 1)
         {
             return Some(inner);
         }
@@ -340,8 +353,9 @@ fn parse_trun(body: &[u8], default_size: Option<usize>) -> Vec<usize> {
         offset += 4;
     }
 
-    let mut sizes = Vec::with_capacity(count.min(4096));
-    for _ in 0..count {
+    let capped = count.min(MAX_SAMPLES_PER_FRAGMENT);
+    let mut sizes = Vec::with_capacity(capped.min(4096));
+    for _ in 0..capped {
         if flags & 0x000100 != 0 {
             offset += 4;
         }
@@ -381,9 +395,10 @@ fn parse_senc(body: &[u8]) -> Vec<[u8; 16]> {
     let flags = u32::from_be_bytes([0, body[1], body[2], body[3]]);
     let count = u32::from_be_bytes([body[4], body[5], body[6], body[7]]) as usize;
     let mut offset = 8;
-    let mut ivs = Vec::with_capacity(count.min(4096));
+    let capped = count.min(MAX_SAMPLES_PER_FRAGMENT);
+    let mut ivs = Vec::with_capacity(capped.min(4096));
 
-    for _ in 0..count {
+    for _ in 0..capped {
         if body.len() < offset + IV_SIZE {
             break;
         }
@@ -662,6 +677,50 @@ mod tests {
         assert_eq!(ivs.len(), 2);
         assert_eq!(ivs[0][..8], [1u8; 8]);
         assert_eq!(ivs[1][..8], [2u8; 8]);
+    }
+
+    #[test]
+    fn a_fragment_claiming_billions_of_samples_does_not_exhaust_memory() {
+        let mut payload = vec![0u8, 0x00, 0x00, 0x00];
+        payload.extend_from_slice(&u32::MAX.to_be_bytes());
+        let sizes = parse_trun(&payload, Some(16));
+        assert!(
+            sizes.len() <= MAX_SAMPLES_PER_FRAGMENT,
+            "{} samples were accepted",
+            sizes.len()
+        );
+    }
+
+    #[test]
+    fn a_senc_claiming_billions_of_samples_is_bounded_too() {
+        let mut payload = vec![0u8, 0x00, 0x00, 0x00];
+        payload.extend_from_slice(&u32::MAX.to_be_bytes());
+        payload.extend_from_slice(&[1u8; 8]);
+        assert!(parse_senc(&payload).len() <= MAX_SAMPLES_PER_FRAGMENT);
+    }
+
+    #[test]
+    fn deeply_nested_boxes_do_not_overflow_the_stack() {
+        let mut nested = mp4_box(b"stsd", &[0u8; 4]);
+        for _ in 0..40_000 {
+            nested = mp4_box(b"moov", &nested);
+        }
+        assert!(find_box(&nested, b"stsd").is_none());
+        assert!(find_box(&nested, b"nope").is_none());
+    }
+
+    #[test]
+    fn an_absurd_sample_size_is_clamped_to_the_media_box() {
+        let mut stream = mp4_box(b"ftyp", b"mp41");
+        stream.extend(moov_with_dfla());
+        let mut traf = mp4_box(b"tfhd", &[0u8; 8]);
+        traf.extend(trun(&[usize::MAX / 2]));
+        traf.extend(senc(&[[1u8; 8]]));
+        stream.extend(mp4_box(b"moof", &mp4_box(b"traf", &traf)));
+        stream.extend(mp4_box(b"mdat", &[0u8; 64]));
+
+        let out = run(&stream);
+        assert_eq!(out.len(), 4 + flac_blocks().len() + 64);
     }
 
     #[test]
