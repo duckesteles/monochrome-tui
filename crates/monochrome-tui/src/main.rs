@@ -28,7 +28,11 @@ const STATUS_LIFETIME: Duration = Duration::from_secs(5);
 const SYNC_DEBOUNCE: Duration = Duration::from_secs(5);
 
 #[derive(Parser, Debug)]
-#[command(name = "monochrome", about = "A terminal client for monochrome.tf")]
+#[command(
+    name = "monochrome",
+    about = "A terminal client for monochrome.tf",
+    version
+)]
 struct Args {
     #[arg(long, help = "Write a log file to the state directory")]
     verbose: bool,
