@@ -48,8 +48,14 @@ if command -v cargo >/dev/null 2>&1; then
 else
     step "Borrowing a Rust toolchain (removed again when this finishes)"
     export CARGO_HOME="$WORK/cargo" RUSTUP_HOME="$WORK/rustup"
-    curl -fsSL https://sh.rustup.rs \
-        | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable >/dev/null
+    if ! curl -fsSL https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable \
+          >"$WORK/rustup.log" 2>&1
+    then
+        say ""
+        tail -20 "$WORK/rustup.log" >&2
+        die "could not fetch a Rust toolchain"
+    fi
     PATH="$CARGO_HOME/bin:$PATH"
     export PATH
     BORROWED_RUST=yes
@@ -58,9 +64,13 @@ fi
 step "Fetching the source"
 git clone --depth 1 --quiet "$REPO" "$WORK/src"
 
-step "Building (a few minutes the first time)"
+step "Building, this takes a couple of minutes"
 cd "$WORK/src"
-cargo build --release --locked --quiet --package monochrome-tui
+if ! cargo build --release --locked --quiet --package monochrome-tui 2>"$WORK/build.log"; then
+    say ""
+    tail -30 "$WORK/build.log" >&2
+    die "the build failed"
+fi
 
 step "Installing"
 mkdir -p "$PREFIX/bin"
