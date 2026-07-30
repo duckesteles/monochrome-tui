@@ -180,7 +180,7 @@ async fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body:
 }
 
 fn nonce() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let mut rng = rand::rng();
     (0..32)
         .map(|_| {

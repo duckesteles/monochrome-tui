@@ -10,8 +10,8 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
-aes = "0.8"
-ctr = "0.9"
+aes = "0.9"
+ctr = "0.10"
 symphonia = { version = "0.5", features = ["all-codecs", "all-formats"] }
 cpal = "0.16"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }

@@ -15,7 +15,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "gzip"] }
 url = "2"
-rand = "0.9"
+rand = "0.10"
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 
 [dev-dependencies]

@@ -466,6 +466,57 @@ mod tests {
         mp4_box(b"senc", &payload)
     }
 
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hex digit"))
+            .collect()
+    }
+
+    #[test]
+    fn the_cipher_matches_the_published_aes_ctr_answers() {
+        let key: [u8; 16] = hex("2b7e151628aed2a6abf7158809cf4f3c")
+            .try_into()
+            .expect("key length");
+        let iv: [u8; 16] = hex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+            .try_into()
+            .expect("iv length");
+        let mut block = hex("6bc1bee22e409f96e93d7e117393172a\
+             ae2d8a571e03ac9c9eb76fac45af8e51\
+             30c81c46a35ce411e5fbc1191a0a52ef\
+             f69f2445df4f9b17ad2b417be66c3710");
+
+        Cipher::new(&key.into(), &iv.into()).apply_keystream(&mut block);
+
+        assert_eq!(
+            block,
+            hex("874d6191b620e3261bef6864990db6ce\
+                 9806f66b7970fdff8617187bb9fffdff\
+                 5ae4df3edbd5d35e5b4f09020db03eab\
+                 1e031dda2fbe03d1792170a0f3009cee",),
+            "the cipher no longer agrees with NIST SP 800-38A F.5.1"
+        );
+    }
+
+    #[test]
+    fn the_counter_stays_in_the_low_half_of_the_block() {
+        let key: [u8; 16] = hex("2b7e151628aed2a6abf7158809cf4f3c")
+            .try_into()
+            .expect("key length");
+        let iv: [u8; 16] = hex("0000000000000000ffffffffffffffff")
+            .try_into()
+            .expect("iv length");
+        let mut stream = vec![0u8; 32];
+
+        Cipher::new(&key.into(), &iv.into()).apply_keystream(&mut stream);
+
+        assert_eq!(
+            &stream[16..],
+            &hex("7df76b0c1ab899b33e42f047b91b546f")[..],
+            "a 64 bit counter wraps within the low half instead of carrying"
+        );
+    }
+
     fn encrypt(key: &[u8; 16], iv: &[u8; 8], data: &[u8]) -> Vec<u8> {
         let mut full = [0u8; 16];
         full[..8].copy_from_slice(iv);
