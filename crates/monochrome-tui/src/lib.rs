@@ -1,5 +1,6 @@
 pub mod app;
 pub mod config;
+pub mod diagnostics;
 pub mod dispatch;
 pub mod help;
 pub mod input;
