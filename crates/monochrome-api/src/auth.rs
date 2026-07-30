@@ -60,6 +60,7 @@ impl AuthClient {
                 "the auth server must be reached over https".into(),
             ));
         }
+        crate::use_ring_for_tls();
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .user_agent(crate::USER_AGENT)

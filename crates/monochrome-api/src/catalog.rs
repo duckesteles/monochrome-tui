@@ -67,6 +67,7 @@ impl Catalog {
         if instances.is_empty() {
             return Err(ApiError::NoInstances);
         }
+        crate::use_ring_for_tls();
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .user_agent(crate::USER_AGENT)

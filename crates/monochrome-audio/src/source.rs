@@ -136,6 +136,7 @@ pub fn is_textual(content_type: &str) -> bool {
 
 impl HttpRange {
     pub fn open(url: &str, headers: &[(String, String)]) -> IoResult<Self> {
+        crate::use_ring_for_tls();
         let client = reqwest::blocking::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .user_agent(concat!("monochrome-tui/", env!("CARGO_PKG_VERSION")))

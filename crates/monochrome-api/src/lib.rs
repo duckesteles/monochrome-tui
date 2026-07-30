@@ -9,6 +9,13 @@ pub mod wire;
 
 pub const USER_AGENT: &str = concat!("monochrome-tui/", env!("CARGO_PKG_VERSION"));
 
+pub fn use_ring_for_tls() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 pub fn is_transport_allowed(url: &str) -> bool {
     if url.starts_with("https://") {
         return true;
