@@ -10,6 +10,7 @@
 set -eu
 
 REPO=https://github.com/duckesteles/monochrome-tui.git
+MIN_RUST=1.88
 PREFIX="${MONOCHROME_PREFIX:-$HOME/.local}"
 BIN="$PREFIX/bin/monochrome"
 WORK=""
@@ -43,10 +44,27 @@ fi
 
 WORK=$(mktemp -d)
 
-if command -v cargo >/dev/null 2>&1; then
+usable_rust() {
+    found=$(cargo --version 2>/dev/null | cut -d' ' -f2)
+    [ -n "$found" ] || return 1
+    found_major=${found%%.*}
+    found_minor=${found#*.}
+    found_minor=${found_minor%%.*}
+    want_major=${MIN_RUST%%.*}
+    want_minor=${MIN_RUST#*.}
+    [ "$found_major" -gt "$want_major" ] && return 0
+    [ "$found_major" -lt "$want_major" ] && return 1
+    [ "$found_minor" -ge "$want_minor" ]
+}
+
+if command -v cargo >/dev/null 2>&1 && usable_rust; then
     step "Using the Rust toolchain you already have"
 else
-    step "Borrowing a Rust toolchain (removed again when this finishes)"
+    if command -v cargo >/dev/null 2>&1; then
+        step "Your Rust is older than $MIN_RUST, borrowing a newer one (removed again when this finishes)"
+    else
+        step "Borrowing a Rust toolchain (removed again when this finishes)"
+    fi
     export CARGO_HOME="$WORK/cargo" RUSTUP_HOME="$WORK/rustup"
     if ! curl -fsSL https://sh.rustup.rs \
         | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable \
