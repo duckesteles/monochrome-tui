@@ -1,6 +1,6 @@
 # Third-party licences
 
-This client links 408 Rust crates. Every one of them is licensed, none are
+This client links 299 Rust crates. Every one of them is licensed, none are
 copyleft beyond the file level, and none restrict commercial or private use.
 
 ## Monochrome
@@ -25,44 +25,44 @@ The audio decoding stack is MPL-2.0 (17 crates). That licence is file-level
 copyleft: it is satisfied by linking the crates unmodified, which is what happens
 here, and by saying where the source is. None of these files have been modified.
 
+Sixteen of them are Symphonia, the decoding stack itself.
+
 Source: https://github.com/pdeljanov/Symphonia
 
-- option-ext, symphonia, symphonia-bundle-flac, symphonia-bundle-mp3, symphonia-codec-aac, symphonia-codec-adpcm, symphonia-codec-alac, symphonia-codec-pcm, symphonia-codec-vorbis, symphonia-core, symphonia-format-caf, symphonia-format-isomp4, symphonia-format-mkv, symphonia-format-ogg, symphonia-format-riff, symphonia-metadata, symphonia-utils-xiph
+- symphonia, symphonia-bundle-flac, symphonia-bundle-mp3, symphonia-codec-aac, symphonia-codec-adpcm, symphonia-codec-alac, symphonia-codec-pcm, symphonia-codec-vorbis, symphonia-common, symphonia-core, symphonia-format-caf, symphonia-format-isomp4, symphonia-format-mkv, symphonia-format-ogg, symphonia-format-riff, symphonia-metadata
+
+The seventeenth arrives with `dirs`, which is how this client finds your
+config and cache directories.
+
+Source: https://github.com/soc/option-ext
+
+- option-ext
 
 ## Everything else
 
 Permissive, and where a choice is offered this project takes the MIT or
 Apache-2.0 option:
 
-- MIT OR Apache-2.0 — 213
-- MIT — 71
-- Apache-2.0 OR MIT — 28
+- MIT OR Apache-2.0 — 155
+- MIT — 61
+- Apache-2.0 OR MIT — 24
 - Unicode-3.0 — 18
-- MIT/Apache-2.0 — 11
-- Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT — 7
-- Zlib OR Apache-2.0 OR MIT — 7
-- Apache-2.0/MIT — 5
-- Unlicense OR MIT — 3
+- Apache-2.0 OR ISC OR MIT — 3
+- MIT/Apache-2.0 — 3
 - Apache-2.0 — 2
-- Apache-2.0 OR ISC OR MIT — 2
-- BSD-2-Clause OR Apache-2.0 OR MIT — 2
-- BSD-3-Clause OR MIT OR Apache-2.0 — 2
+- Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT — 2
+- Apache-2.0/MIT — 2
 - ISC — 2
-- MIT OR Apache-2.0 OR LGPL-2.1-or-later — 2
-- MIT OR Apache-2.0 OR Zlib — 2
-- Unlicense/MIT — 2
-- (Apache-2.0 OR MIT) AND BSD-3-Clause — 1
 - (MIT OR Apache-2.0) AND Unicode-3.0 — 1
 - 0BSD OR MIT OR Apache-2.0 — 1
 - Apache-2.0 / MIT — 1
 - Apache-2.0 AND ISC — 1
 - Apache-2.0 OR BSL-1.0 — 1
-- BSD-2-Clause OR MIT OR Apache-2.0 — 1
 - BSD-3-Clause — 1
-- CDLA-Permissive-2.0 — 1
-- MIT / Apache-2.0 — 1
 - MIT OR Zlib OR Apache-2.0 — 1
+- Unlicense OR MIT — 1
 - Zlib — 1
+- Zlib OR Apache-2.0 OR MIT — 1
 
 ## Distributing a build
 

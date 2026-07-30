@@ -50,19 +50,17 @@ Email and password. Your token is kept in the system keyring.
 Search with `/`, press enter on a track. Your saved tracks, playlists and
 history are the same ones the web app has, and changes sync back.
 
-The first time you play something you will be asked for an Amazon token. This
-is not optional and it is not something this client can avoid: the gateway that
-serves the audio sits behind a Cloudflare check that a terminal cannot pass.
+The first time you play something, a browser tab opens so the gateway that
+serves the audio can run its Cloudflare check. A terminal cannot pass that
+check on its own. Clear it in the browser and playback starts.
 
-To get one:
+The result lasts about an hour and survives restarts. If the browser check
+cannot run, the same screen accepts a token pasted by hand: open
+[monochrome.tf](https://monochrome.tf), play anything, and copy
+`amazon_turnstile_jwt` out of the site's local storage.
 
-1. Open [monochrome.tf](https://monochrome.tf) and play anything.
-2. In the browser console, run
-   `copy(localStorage.getItem('amazon_turnstile_jwt'))`.
-3. Paste it into the terminal and press enter.
-
-It lasts about an hour and survives restarts. If you ever get a permanent
-gateway credential, put it in the config and you will never see the prompt:
+If you ever get a permanent gateway credential, put it in the config and you
+will never see the prompt:
 
 ```toml
 [amazon]
