@@ -6,18 +6,42 @@ account you already use on the web and listen from your terminal.
 ## Install
 
 Needs Rust 1.85 or newer and `libasound2` (ALSA), which every desktop
-distribution already has.
+distribution already ships.
 
 ```sh
 git clone https://github.com/duckesteles/monochrome-tui
 cd monochrome-tui
-cargo build --release
-./target/release/monochrome
+cargo install --path crates/monochrome-tui --root ~/.local
 ```
 
-Building leaves several gigabytes of intermediate files in `target/`. Once you
-have the binary you can copy it somewhere on your path and run `cargo clean` to
-get that space back; the program itself is a single 10 MB file.
+Then run it from anywhere:
+
+```sh
+monochrome
+```
+
+That is the whole installation: one 10 MB file in `~/.local/bin`, which is
+already on the path on most systems. The build happens in a temporary
+directory, so once it finishes you can delete the cloned folder.
+
+If your shell answers `command not found`, `~/.local/bin` is not on your path.
+Add it:
+
+```sh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc      # zsh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc     # bash
+fish_add_path ~/.local/bin                                   # fish
+```
+
+To remove it later:
+
+```sh
+cargo uninstall --root ~/.local monochrome-tui
+```
+
+If you built with `cargo build` instead, the binary is at
+`target/release/monochrome` and the build leaves several gigabytes in
+`target/`; `cargo clean` frees that.
 
 ## Signing in
 
