@@ -15,6 +15,10 @@ cargo build --release
 ./target/release/monochrome
 ```
 
+Building leaves several gigabytes of intermediate files in `target/`. Once you
+have the binary you can copy it somewhere on your path and run `cargo clean` to
+get that space back; the program itself is a single 10 MB file.
+
 ## Signing in
 
 Email and password. Your token is kept in the system keyring.
@@ -69,6 +73,24 @@ monochrome --play "artist song"  # does audio work, without opening the app
 
 `--doctor` will tell you if your Amazon token has expired, which is the usual
 cause of a track refusing to play.
+
+## Where things are kept
+
+```
+~/.config/monochrome-tui/config.toml        settings
+~/.local/state/monochrome-tui/snapshot.json your library, so the first screen is not empty
+~/.local/state/monochrome-tui/credentials   only if your system has no keyring
+~/.local/state/monochrome-tui/log           only with --verbose
+~/.cache/monochrome-tui/                    the track being played, nothing more
+```
+
+All of it is readable only by you.
+
+Nothing you listen to is kept. The track currently playing is buffered to a
+file so seeking is instant; that file is unlinked the moment it is opened, so
+it never appears in the directory, and the space is released when you move to
+the next track. One track at a time, around 15 MB for a four minute lossless
+song. Sign out and the library snapshot is cleared.
 
 ## Configuration
 

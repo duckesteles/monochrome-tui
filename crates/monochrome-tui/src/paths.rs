@@ -4,10 +4,47 @@ use std::path::Path;
 #[cfg(unix)]
 const PRIVATE_MODE: u32 = 0o600;
 
+pub fn create_private_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path).with_context(|| format!("cannot create {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+pub fn create_private_file(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        create_private_dir(parent)?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(PRIVATE_MODE)
+            .open(path)
+            .with_context(|| format!("cannot open {}", path.display()))?;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_MODE));
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .with_context(|| format!("cannot open {}", path.display()))?;
+    }
+    Ok(())
+}
+
 pub fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create {}", parent.display()))?;
+        create_private_dir(parent)?;
     }
 
     let temporary = path.with_extension("tmp");
@@ -71,6 +108,53 @@ mod tests {
             .mode();
         assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_log_file_is_created_private_to_the_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = scratch("log");
+        create_private_file(&path).expect("create");
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_world_readable_log_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = scratch("loose");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+        std::fs::write(&path, b"old").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        create_private_file(&path).expect("tighten");
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_directories_are_private_too() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = scratch("dir");
+        let directory = path.parent().unwrap();
+        create_private_dir(directory).expect("create");
+        let mode = std::fs::metadata(directory)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "mode was {:o}", mode & 0o777);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]

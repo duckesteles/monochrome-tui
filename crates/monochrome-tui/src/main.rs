@@ -92,7 +92,8 @@ fn main() -> Result<()> {
 }
 
 fn setup_logging(dir: &std::path::Path) -> Result<tracing_appender::non_blocking::WorkerGuard> {
-    std::fs::create_dir_all(dir)?;
+    monochrome_tui::paths::create_private_dir(dir)?;
+    monochrome_tui::paths::create_private_file(&dir.join("log"))?;
     let appender = tracing_appender::rolling::never(dir, "log");
     let (writer, guard) = tracing_appender::non_blocking(appender);
     tracing_subscriber::fmt()
