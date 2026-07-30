@@ -1,0 +1,22 @@
+[package]
+name = "monochrome-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+monochrome-core = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "gzip"] }
+url = "2"
+rand = "0.9"
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

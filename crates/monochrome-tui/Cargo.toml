@@ -1,0 +1,31 @@
+[package]
+name = "monochrome-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "monochrome"
+path = "src/main.rs"
+
+[dependencies]
+monochrome-api = { workspace = true }
+monochrome-audio = { workspace = true }
+monochrome-core = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+toml = "0.8"
+dirs = "6"
+keyring = { version = "3", default-features = false, features = ["async-secret-service", "crypto-rust", "tokio"] }
+clap = { version = "4", features = ["derive"] }
+open = "5"
+unicode-width = "0.2"
+futures = { version = "0.3", default-features = false, features = ["std"] }
