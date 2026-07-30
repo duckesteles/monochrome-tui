@@ -15,6 +15,11 @@ pub struct Bridge {
 
 impl Bridge {
     pub async fn bind(site_key: &str) -> ApiResult<Self> {
+        if !is_safe_site_key(site_key) {
+            return Err(ApiError::Network(
+                "the configured turnstile site key is not a plain key".into(),
+            ));
+        }
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .map_err(|error| ApiError::Network(format!("cannot open the local bridge: {error}")))?;
@@ -64,7 +69,7 @@ impl Bridge {
             let (path, query) = split_target(&target);
             let supplied_nonce = param(query, "n").unwrap_or_default();
 
-            if supplied_nonce != self.nonce {
+            if !same_secret(&supplied_nonce, &self.nonce) {
                 respond(&mut stream, "403 Forbidden", "text/plain", "forbidden").await;
                 continue;
             }
@@ -112,6 +117,25 @@ async fn read_request(stream: &mut TcpStream) -> Option<String> {
         }
     }
     Some(String::from_utf8_lossy(&buffer[..filled]).into_owned())
+}
+
+fn same_secret(supplied: &str, expected: &str) -> bool {
+    if supplied.len() != expected.len() {
+        return false;
+    }
+    supplied
+        .bytes()
+        .zip(expected.bytes())
+        .fold(0u8, |differences, (a, b)| differences | (a ^ b))
+        == 0
+}
+
+fn is_safe_site_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn request_target(request: &str) -> Option<String> {
@@ -201,6 +225,11 @@ pub fn describe_turnstile_error(code: &str) -> String {
         }
         _ => "the browser check did not complete",
     };
+    let code: String = code
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
+        .take(32)
+        .collect();
     format!("turnstile {code}: {explanation}")
 }
 
@@ -251,6 +280,36 @@ const DONE_PAGE: &str = "<!doctype html><meta charset=\"utf-8\"><title>Monochrom
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_error_code_from_the_page_cannot_flood_the_message() {
+        let message = super::describe_turnstile_error(&"9".repeat(500));
+        assert!(message.len() < 120, "{} characters", message.len());
+
+        let message = super::describe_turnstile_error("110200\n\nSOMETHING ELSE ENTIRELY");
+        assert!(!message.contains('\n'));
+        assert!(!message.contains("ENTIRELY"));
+        assert!(message.contains("110200"));
+    }
+
+    #[test]
+    fn a_nonce_is_compared_without_leaking_where_it_differs() {
+        assert!(super::same_secret("abc123", "abc123"));
+        assert!(!super::same_secret("abc123", "abc124"));
+        assert!(!super::same_secret("abc123", "abc12"));
+        assert!(!super::same_secret("", "abc123"));
+        assert!(super::same_secret("", ""));
+    }
+
+    #[test]
+    fn a_site_key_that_could_break_out_of_the_page_is_refused() {
+        assert!(super::is_safe_site_key("0x4AAAAAADgxqF6QVMm0GLHH"));
+        assert!(super::is_safe_site_key("key_with-parts"));
+        assert!(!super::is_safe_site_key(""));
+        assert!(!super::is_safe_site_key("key';alert(1);//"));
+        assert!(!super::is_safe_site_key("key with spaces"));
+        assert!(!super::is_safe_site_key(&"k".repeat(65)));
+    }
+
     use super::*;
 
     #[test]

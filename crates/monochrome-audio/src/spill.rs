@@ -224,6 +224,11 @@ fn scratch_dir() -> std::path::PathBuf {
 
 fn scratch_file_in(directory: &std::path::Path) -> IoResult<(File, std::path::PathBuf)> {
     let _ = std::fs::create_dir_all(directory);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700));
+    }
 
     for attempt in 0..64u32 {
         let path = directory.join(format!("monochrome-{}-{attempt}.audio", std::process::id()));

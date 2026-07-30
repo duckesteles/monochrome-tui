@@ -6,6 +6,20 @@ use monochrome_api::{AuthClient, Catalog, StreamResolver};
 use monochrome_audio::{PlayRequest, Player};
 use std::time::Duration;
 
+fn describe_address(seen: Option<String>, issued_for: &[String]) -> String {
+    let Some(seen) = seen else {
+        return "could not report the address it sees".into();
+    };
+    if issued_for.is_empty() {
+        return "reachable".into();
+    }
+    if issued_for.iter().any(|address| address == &seen) {
+        "sees the address the token was issued for".into()
+    } else {
+        "sees a different address than the token was issued for, verify again".into()
+    }
+}
+
 pub async fn doctor(paths: Paths) -> Result<()> {
     let config = Config::load(&paths.config)?;
     let secrets = Secrets::new(paths.log_dir.join("credentials"));
@@ -26,8 +40,8 @@ pub async fn doctor(paths: Paths) -> Result<()> {
     match secrets.get(SESSION_TOKEN) {
         None => println!("session   not signed in"),
         Some(token) => match auth.me(&token).await {
-            Ok(user) => {
-                println!("session   ok, signed in as {}", user.display_name());
+            Ok(_) => {
+                println!("session   ok, signed in");
                 match auth.load_sync(&token).await {
                     Ok(document) => {
                         let library = monochrome_core::Library::new(document);
@@ -63,10 +77,13 @@ pub async fn doctor(paths: Paths) -> Result<()> {
     if let Some(jwt) = secrets.get(AMAZON_JWT) {
         resolver.cache_jwt(jwt);
     }
-    match resolver.gateway_client_ip().await {
-        Some(address) => println!("gateway   sees this client as {address}"),
-        None => println!("gateway   could not report the address it sees"),
-    }
+    let seen = resolver.gateway_client_ip().await;
+    let issued_for = secrets
+        .get(AMAZON_JWT)
+        .and_then(|token| monochrome_api::jwt::inspect(&token))
+        .map(|claims| claims.addresses)
+        .unwrap_or_default();
+    println!("gateway   {}", describe_address(seen, &issued_for));
 
     if resolver.has_amazon_credential() {
         match resolver.validate_credential().await {
@@ -556,5 +573,44 @@ mod tests {
         assert_eq!(wanted_len("one; two; three"), 3);
         assert_eq!(wanted_len("one;;two"), 2);
         assert_eq!(wanted_len("  "), 0);
+    }
+
+    #[test]
+    fn the_gateways_view_is_compared_rather_than_printed() {
+        let issued = vec!["203.0.113.7".to_string()];
+        assert_eq!(
+            describe_address(Some("203.0.113.7".into()), &issued),
+            "sees the address the token was issued for"
+        );
+        assert_eq!(
+            describe_address(Some("198.51.100.4".into()), &issued),
+            "sees a different address than the token was issued for, verify again"
+        );
+    }
+
+    #[test]
+    fn no_address_ever_reaches_the_report() {
+        let issued = vec!["203.0.113.7".to_string()];
+        for seen in [
+            Some("203.0.113.7".to_string()),
+            Some("198.51.100.4".to_string()),
+            None,
+        ] {
+            let line = describe_address(seen, &issued);
+            assert!(!line.contains("203.0.113"), "leaked: {line}");
+            assert!(!line.contains("198.51.100"), "leaked: {line}");
+        }
+    }
+
+    #[test]
+    fn without_a_token_there_is_nothing_to_compare_against() {
+        assert_eq!(
+            describe_address(Some("203.0.113.7".into()), &[]),
+            "reachable"
+        );
+        assert_eq!(
+            describe_address(None, &[]),
+            "could not report the address it sees"
+        );
     }
 }
