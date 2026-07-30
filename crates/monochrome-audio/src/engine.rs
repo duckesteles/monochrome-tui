@@ -411,6 +411,7 @@ fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) 
                 Ok(Command::Play(request)) => {
                     idle = false;
                     shared.playing.store(false, Ordering::Relaxed);
+                    drop(playback.take());
                     shared.ring.clear();
                     shared.frames.store(0, Ordering::Relaxed);
                     pending.clear();

@@ -466,6 +466,7 @@ async fn play_once(paths: Paths, query: String) -> Result<()> {
 
     let (player, events) = Player::spawn();
     player.set_volume(0.0);
+    let started_at = std::time::Instant::now();
     player.play(PlayRequest {
         url: handle.url,
         headers: handle.headers,
@@ -487,6 +488,10 @@ async fn play_once(paths: Paths, query: String) -> Result<()> {
                 channels,
                 codec,
             }) => {
+                println!(
+                    "latency   {:.2} s to first audio",
+                    started_at.elapsed().as_secs_f64()
+                );
                 println!(
                     "started   {codec} {sample_rate} Hz, {channels} channels, {}",
                     duration

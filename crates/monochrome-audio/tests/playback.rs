@@ -162,6 +162,60 @@ fn failure_for(url: String) -> String {
         .expect("the player should report a failure")
 }
 
+fn wait_for_start(
+    events: &std::sync::mpsc::Receiver<Event>,
+    limit: Duration,
+) -> Option<Result<(), String>> {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        match events.recv_timeout(Duration::from_millis(200)) {
+            Ok(Event::Started { .. }) => return Some(Ok(())),
+            Ok(Event::Failed(reason)) => return Some(Err(reason)),
+            _ => continue,
+        }
+    }
+    None
+}
+
+#[test]
+fn switching_tracks_starts_the_new_one_promptly() {
+    let first = serve(wav(44_100, 2, 44_100 * 30));
+    let second = serve(wav(44_100, 2, 44_100 * 30));
+    let (player, events) = Player::spawn();
+    player.set_volume(0.0);
+
+    let request = |url: String| PlayRequest {
+        url,
+        headers: Vec::new(),
+        replay_gain: None,
+        peak: None,
+        decryption_key: None,
+    };
+
+    player.play(request(first.url.clone()));
+    match wait_for_start(&events, Duration::from_secs(20)) {
+        Some(Ok(())) => {}
+        Some(Err(_)) => return,
+        None => panic!("the first track should start"),
+    }
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    let switch = Instant::now();
+    player.play(request(second.url.clone()));
+
+    match wait_for_start(&events, Duration::from_secs(15)) {
+        Some(Ok(())) => {}
+        Some(Err(reason)) => panic!("switching failed: {reason}"),
+        None => panic!("the second track should start"),
+    }
+    let taken = switch.elapsed();
+    assert!(
+        taken < Duration::from_secs(5),
+        "switching took {taken:?}, which a listener would notice"
+    );
+}
+
 #[test]
 fn a_gateway_that_answers_with_json_instead_of_audio_reports_its_message() {
     let serving = serve_json(200, r#"{"detail":"Invalid Turnstile JWT."}"#);

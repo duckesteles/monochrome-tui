@@ -7,11 +7,13 @@ use symphonia::core::io::MediaSource;
 
 const CHUNK: usize = 64 * 1024;
 const WAIT: Duration = Duration::from_millis(2);
+const STALL_LIMIT: Duration = Duration::from_secs(30);
 
 struct Progress {
     written: AtomicU64,
     drained: AtomicBool,
     failed: AtomicBool,
+    cancelled: AtomicBool,
 }
 
 pub struct Spill {
@@ -28,6 +30,7 @@ impl Spill {
             written: AtomicU64::new(0),
             drained: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
         });
 
         let filling = Arc::clone(&progress);
@@ -37,6 +40,9 @@ impl Spill {
                 let mut scratch = vec![0u8; CHUNK];
                 let mut offset = 0u64;
                 loop {
+                    if filling.cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
                     match inner.read(&mut scratch) {
                         Ok(0) => break,
                         Ok(read) => {
@@ -74,11 +80,18 @@ impl Spill {
         self.progress.drained.load(Ordering::Acquire)
     }
 
-    fn wait_for(&self, offset: u64) -> u64 {
+    fn wait_for(&self, offset: u64) -> IoResult<u64> {
+        let deadline = std::time::Instant::now() + STALL_LIMIT;
         loop {
             let written = self.buffered();
             if written > offset || self.is_complete() {
-                return written;
+                return Ok(written);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the audio source stopped sending data",
+                ));
             }
             std::thread::sleep(WAIT);
         }
@@ -90,7 +103,7 @@ impl Read for Spill {
         if buffer.is_empty() {
             return Ok(0);
         }
-        let written = self.wait_for(self.position);
+        let written = self.wait_for(self.position)?;
         if self.position >= written {
             return Ok(0);
         }
@@ -108,7 +121,14 @@ impl Seek for Spill {
             SeekFrom::Start(offset) => offset as i128,
             SeekFrom::Current(delta) => self.position as i128 + delta as i128,
             SeekFrom::End(delta) => {
+                let deadline = std::time::Instant::now() + STALL_LIMIT;
                 while !self.is_complete() {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "the audio source stopped sending data",
+                        ));
+                    }
                     std::thread::sleep(WAIT);
                 }
                 self.buffered() as i128 + delta as i128
@@ -132,6 +152,12 @@ impl MediaSource for Spill {
 
     fn byte_len(&self) -> Option<u64> {
         self.is_complete().then(|| self.buffered())
+    }
+}
+
+impl Drop for Spill {
+    fn drop(&mut self) {
+        self.progress.cancelled.store(true, Ordering::Release);
     }
 }
 
@@ -274,6 +300,47 @@ mod tests {
         let mut out = Vec::new();
         spill.read_to_end(&mut out).expect("read");
         assert_eq!(out.len(), 4096);
+    }
+
+    #[test]
+    fn dropping_the_buffer_stops_the_fetch_it_started() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let source = CountingSource {
+            remaining: 10_000_000,
+            counted: Arc::clone(&counter),
+        };
+
+        let spill = Spill::new(source).expect("spill");
+        std::thread::sleep(Duration::from_millis(40));
+        drop(spill);
+
+        let after_drop = counter.load(Ordering::Acquire);
+        std::thread::sleep(Duration::from_millis(120));
+        let later = counter.load(Ordering::Acquire);
+
+        assert!(
+            later <= after_drop + 4096,
+            "the fetch kept running after the buffer was dropped: {after_drop} then {later}"
+        );
+    }
+
+    struct CountingSource {
+        remaining: usize,
+        counted: Arc<AtomicU64>,
+    }
+
+    impl Read for CountingSource {
+        fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+            if self.remaining == 0 {
+                return Ok(0);
+            }
+            std::thread::sleep(Duration::from_millis(4));
+            let take = buffer.len().min(self.remaining).min(2048);
+            buffer[..take].fill(3);
+            self.remaining -= take;
+            self.counted.fetch_add(take as u64, Ordering::AcqRel);
+            Ok(take)
+        }
     }
 
     #[test]
