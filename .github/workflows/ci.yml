@@ -23,6 +23,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install ALSA headers
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Give the runner a silent sound card
+        run: printf 'pcm.!default { type null }\nctl.!default { type null }\n' | sudo tee /etc/asound.conf
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace

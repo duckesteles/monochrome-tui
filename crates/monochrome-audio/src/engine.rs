@@ -162,6 +162,9 @@ impl Drop for Player {
     }
 }
 
+const FALLBACK_RATE: u32 = 48_000;
+const FALLBACK_CHANNELS: usize = 2;
+
 struct Output {
     _stream: cpal::Stream,
     sample_rate: u32,
@@ -274,7 +277,7 @@ struct Playback {
     failed: bool,
 }
 
-fn open(request: &PlayRequest, output: &Output) -> Result<Playback, String> {
+fn open(request: &PlayRequest) -> Result<Playback, String> {
     let backend = HttpRange::open(&request.url, &request.headers)
         .map_err(|error| format!("cannot reach the audio source: {error}"))?;
 
@@ -312,14 +315,12 @@ fn open(request: &PlayRequest, output: &Output) -> Result<Playback, String> {
             flac_hint.with_extension("flac");
             return prepare(
                 MediaSourceStream::new(Box::new(buffered), MediaSourceStreamOptions::default()),
-                output.sample_rate,
-                output.channels,
                 flac_hint,
             );
         }
         None => MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default()),
     };
-    prepare(stream, output.sample_rate, output.channels, hint)
+    prepare(stream, hint)
 }
 
 fn read_error_body(backend: &HttpRange) -> Option<String> {
@@ -332,12 +333,7 @@ fn read_error_body(backend: &HttpRange) -> Option<String> {
     source::summarise(&body)
 }
 
-fn prepare(
-    stream: MediaSourceStream,
-    output_rate: u32,
-    output_channels: usize,
-    hint: Hint,
-) -> Result<Playback, String> {
+fn prepare(stream: MediaSourceStream, hint: Hint) -> Result<Playback, String> {
     let probed = symphonia::default::get_probe()
         .format(
             &hint,
@@ -368,11 +364,11 @@ fn prepare(
         .make(&parameters, &DecoderOptions::default())
         .map_err(|error| format!("no decoder for this stream: {error}"))?;
 
-    let source_rate = parameters.sample_rate.unwrap_or(output_rate);
+    let source_rate = parameters.sample_rate.unwrap_or(FALLBACK_RATE);
     let source_channels = parameters
         .channels
         .map(|channels| channels.count())
-        .unwrap_or(2);
+        .unwrap_or(FALLBACK_CHANNELS);
     let duration = match (parameters.n_frames, parameters.sample_rate) {
         (Some(frames), Some(rate)) if rate > 0 => Some(frames as f64 / rate as f64),
         _ => None,
@@ -385,7 +381,7 @@ fn prepare(
         source_rate,
         source_channels,
         duration,
-        resampler: LinearResampler::new(source_rate, output_rate, output_channels),
+        resampler: LinearResampler::new(source_rate, source_rate, source_channels),
         finished: false,
         failed: false,
     })
@@ -429,11 +425,24 @@ fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) 
                         Ordering::Relaxed,
                     );
 
+                    let mut opened = match open(&request) {
+                        Ok(opened) => opened,
+                        Err(error) => {
+                            let _ = events.send(Event::Failed(error));
+                            playback = None;
+                            continue;
+                        }
+                    };
+
                     let device = match output.take() {
                         Some(device) => Ok(device),
-                        None => build_output(&shared, 48_000, 2),
+                        None => {
+                            build_output(&shared, opened.source_rate, opened.source_channels as u16)
+                        }
                     };
-                    let device = match device {
+                    let device = match device
+                        .and_then(|device| rebuild_if_needed(&shared, device, &mut opened))
+                    {
                         Ok(device) => device,
                         Err(error) => {
                             let _ = events.send(Event::Failed(error));
@@ -442,38 +451,21 @@ fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) 
                         }
                     };
 
-                    match open(&request, &device) {
-                        Ok(mut opened) => {
-                            let device = match rebuild_if_needed(&shared, device, &mut opened) {
-                                Ok(device) => device,
-                                Err(error) => {
-                                    let _ = events.send(Event::Failed(error));
-                                    playback = None;
-                                    continue;
-                                }
-                            };
-                            let _ = events.send(Event::Output {
-                                sample_rate: device.sample_rate,
-                                channels: device.channels as u16,
-                                resampling: !opened.resampler.is_identity()
-                                    || device.channels != opened.source_channels,
-                            });
-                            let _ = events.send(Event::Started {
-                                duration: opened.duration,
-                                sample_rate: opened.source_rate,
-                                channels: opened.source_channels as u16,
-                                codec: codec_name(&opened),
-                            });
-                            output = Some(device);
-                            playback = Some(opened);
-                            shared.playing.store(true, Ordering::Relaxed);
-                        }
-                        Err(error) => {
-                            output = Some(device);
-                            playback = None;
-                            let _ = events.send(Event::Failed(error));
-                        }
-                    }
+                    let _ = events.send(Event::Output {
+                        sample_rate: device.sample_rate,
+                        channels: device.channels as u16,
+                        resampling: !opened.resampler.is_identity()
+                            || device.channels != opened.source_channels,
+                    });
+                    let _ = events.send(Event::Started {
+                        duration: opened.duration,
+                        sample_rate: opened.source_rate,
+                        channels: opened.source_channels as u16,
+                        codec: codec_name(&opened),
+                    });
+                    output = Some(device);
+                    playback = Some(opened);
+                    shared.playing.store(true, Ordering::Relaxed);
                 }
                 Ok(Command::Pause) => {
                     idle = false;
@@ -507,7 +499,7 @@ fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) 
                     let landed = match seeked_in_place {
                         true => true,
                         false => match (current.as_ref(), output.as_ref()) {
-                            (Some(request), Some(device)) => match open(request, device) {
+                            (Some(request), Some(device)) => match open(request) {
                                 Ok(mut reopened) => {
                                     reopened.retune(device.sample_rate, device.channels);
                                     let landed = seek_within(&mut reopened, seconds);
@@ -848,7 +840,9 @@ mod decode_tests {
     ) -> Playback {
         let source = RangeSource::new(Box::new(MemoryRange::new(bytes, true)));
         let stream = MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default());
-        prepare(stream, output_rate, output_channels, Hint::new()).expect("stream is playable")
+        let mut playback = prepare(stream, Hint::new()).expect("stream is playable");
+        playback.retune(output_rate, output_channels);
+        playback
     }
 
     fn drain(playback: &mut Playback, output_channels: usize) -> Vec<f32> {
@@ -958,7 +952,7 @@ mod decode_tests {
             true,
         )));
         let stream = MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default());
-        assert!(prepare(stream, 44_100, 2, Hint::new()).is_err());
+        assert!(prepare(stream, Hint::new()).is_err());
     }
 
     #[test]
