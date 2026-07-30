@@ -240,6 +240,41 @@ fn a_gateway_error_status_carries_its_message_too() {
 }
 
 #[test]
+fn a_cd_rate_track_reaches_a_cd_rate_device_untouched() {
+    let serving = serve(wav(44_100, 2, 44_100 / 2));
+    let (player, events) = Player::spawn();
+    player.set_volume(0.0);
+    player.play(PlayRequest {
+        url: serving.url.clone(),
+        headers: Vec::new(),
+        replay_gain: None,
+        peak: None,
+        decryption_key: None,
+    });
+
+    let seen = collect(&events, Duration::from_secs(20));
+    let output = seen.iter().find_map(|event| match event {
+        Event::Output {
+            sample_rate,
+            channels,
+            resampling,
+        } => Some((*sample_rate, *channels, *resampling)),
+        _ => None,
+    });
+
+    let Some((sample_rate, channels, resampling)) = output else {
+        return;
+    };
+    if sample_rate != 44_100 || channels != 2 {
+        return;
+    }
+    assert!(
+        !resampling,
+        "a 44.1 kHz track was resampled onto a 44.1 kHz device, which loses the original samples"
+    );
+}
+
+#[test]
 fn a_source_that_answers_with_an_error_is_reported_not_ignored() {
     let (player, events) = Player::spawn();
     player.play(PlayRequest {

@@ -187,20 +187,20 @@ fn build_output(
         for range in &ranges {
             if range.sample_format() == cpal::SampleFormat::F32
                 && range.channels() == preferred_channels
-                && range.min_sample_rate().0 <= preferred_rate
-                && range.max_sample_rate().0 >= preferred_rate
+                && range.min_sample_rate() <= preferred_rate
+                && range.max_sample_rate() >= preferred_rate
             {
-                chosen = Some(range.with_sample_rate(cpal::SampleRate(preferred_rate)));
+                chosen = Some(range.with_sample_rate(preferred_rate));
                 break;
             }
         }
         if chosen.is_none() {
             for range in &ranges {
                 if range.sample_format() == cpal::SampleFormat::F32
-                    && range.min_sample_rate().0 <= preferred_rate
-                    && range.max_sample_rate().0 >= preferred_rate
+                    && range.min_sample_rate() <= preferred_rate
+                    && range.max_sample_rate() >= preferred_rate
                 {
-                    chosen = Some(range.with_sample_rate(cpal::SampleRate(preferred_rate)));
+                    chosen = Some(range.with_sample_rate(preferred_rate));
                     break;
                 }
             }
@@ -214,7 +214,7 @@ fn build_output(
             .map_err(|error| format!("no usable audio configuration: {error}"))?,
     };
 
-    let sample_rate = config.sample_rate().0;
+    let sample_rate = config.sample_rate();
     let channels = config.channels() as usize;
     shared
         .output_channels
@@ -223,7 +223,7 @@ fn build_output(
     let callback_shared = Arc::clone(shared);
     let stream = device
         .build_output_stream(
-            &config.config(),
+            config.config(),
             move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 if !callback_shared.playing.load(Ordering::Relaxed) {
                     output.fill(0.0);
