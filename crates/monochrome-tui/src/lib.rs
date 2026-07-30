@@ -8,6 +8,7 @@ pub mod paths;
 pub mod secrets;
 pub mod sync;
 pub mod theme;
+pub mod uninstall;
 pub mod views;
 
 #[cfg(test)]

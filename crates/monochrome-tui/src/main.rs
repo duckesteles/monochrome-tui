@@ -48,6 +48,10 @@ struct Args {
         help = "Play the first match for a few seconds, then exit"
     )]
     play: Option<String>,
+    #[arg(long, help = "Remove the program and everything it stored, then exit")]
+    uninstall: bool,
+    #[arg(long, help = "Answer yes to the uninstall prompt")]
+    yes: bool,
 }
 
 struct Services {
@@ -79,6 +83,10 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
 
+    if args.uninstall {
+        return uninstall(paths, args.yes);
+    }
+
     if args.doctor {
         return runtime.block_on(monochrome_tui::diagnostics::doctor(paths));
     }
@@ -89,6 +97,43 @@ fn main() -> Result<()> {
         return runtime.block_on(monochrome_tui::diagnostics::play_once(paths, query));
     }
     runtime.block_on(run(paths))
+}
+
+fn uninstall(paths: Paths, assume_yes: bool) -> Result<()> {
+    use monochrome_tui::uninstall::{execute, plan};
+
+    let binary = std::env::current_exe().ok();
+    let targets = plan(&paths, binary);
+
+    println!("This removes monochrome and everything it stored:");
+    println!();
+    for target in &targets {
+        let mark = if target.exists() { " " } else { "-" };
+        println!("  {mark} {}", target.describe());
+    }
+    println!();
+
+    if !assume_yes {
+        print!("Type yes to go ahead: ");
+        use std::io::Write;
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if answer.trim() != "yes" {
+            println!("Nothing was removed.");
+            return Ok(());
+        }
+        println!();
+    }
+
+    let secrets = Secrets::new(paths.log_dir.join("credentials"));
+    for (what, done) in execute(&targets, &secrets) {
+        println!("  {} {what}", if done { "removed" } else { "FAILED " });
+    }
+
+    println!();
+    println!("Done. Nothing of monochrome is left on this machine.");
+    Ok(())
 }
 
 fn setup_logging(dir: &std::path::Path) -> Result<tracing_appender::non_blocking::WorkerGuard> {

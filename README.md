@@ -5,8 +5,32 @@ account you already use on the web and listen from your terminal.
 
 ## Install
 
-Needs Rust 1.85 or newer and `libasound2` (ALSA), which every desktop
-distribution already ships.
+```sh
+curl -fsSL https://raw.githubusercontent.com/duckesteles/monochrome-tui/main/install.sh | sh
+```
+
+Then run `monochrome`.
+
+That is all of it. The script builds in a temporary directory and deletes it
+afterwards, so what stays on your machine is one 10 MB program in
+`~/.local/bin` and nothing else. If you have no Rust toolchain it borrows one
+for the build and removes that too.
+
+You need `git`, `curl` and your distribution's ALSA development package. The
+script checks and tells you the exact command if it is missing.
+
+To remove it, along with everything it stored:
+
+```sh
+monochrome --uninstall
+```
+
+That takes out the settings, the library snapshot, the cache and both tokens
+from your system keyring, then the program itself. It lists what it will do and
+waits for you to type yes.
+
+<details>
+<summary>Building it yourself instead</summary>
 
 ```sh
 git clone https://github.com/duckesteles/monochrome-tui
@@ -14,34 +38,8 @@ cd monochrome-tui
 cargo install --path crates/monochrome-tui --root ~/.local
 ```
 
-Then run it from anywhere:
-
-```sh
-monochrome
-```
-
-That is the whole installation: one 10 MB file in `~/.local/bin`, which is
-already on the path on most systems. The build happens in a temporary
-directory, so once it finishes you can delete the cloned folder.
-
-If your shell answers `command not found`, `~/.local/bin` is not on your path.
-Add it:
-
-```sh
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc      # zsh
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc     # bash
-fish_add_path ~/.local/bin                                   # fish
-```
-
-To remove it later:
-
-```sh
-cargo uninstall --root ~/.local monochrome-tui
-```
-
-If you built with `cargo build` instead, the binary is at
-`target/release/monochrome` and the build leaves several gigabytes in
-`target/`; `cargo clean` frees that.
+`cargo build` leaves several gigabytes in `target/`; `cargo clean` frees it.
+</details>
 
 ## Signing in
 
