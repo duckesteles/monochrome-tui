@@ -106,10 +106,7 @@ pub struct StreamResolver {
 
 impl StreamResolver {
     pub fn new(config: StreamConfig) -> ApiResult<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .user_agent(crate::USER_AGENT)
-            .build()?;
+        let client = crate::http_client(REQUEST_TIMEOUT)?;
         Ok(Self {
             client,
             config,

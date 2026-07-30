@@ -16,6 +16,14 @@ pub fn use_ring_for_tls() {
     });
 }
 
+pub(crate) fn http_client(timeout: std::time::Duration) -> reqwest::Result<reqwest::Client> {
+    use_ring_for_tls();
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(USER_AGENT)
+        .build()
+}
+
 pub fn is_transport_allowed(url: &str) -> bool {
     if url.starts_with("https://") {
         return true;
