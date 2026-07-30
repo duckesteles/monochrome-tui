@@ -431,6 +431,12 @@ fn summarise_value(key: &str, value: &serde_json::Value) -> String {
 }
 
 async fn play_once(paths: Paths, query: String) -> Result<()> {
+    if std::env::var_os("RUST_LOG").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init();
+    }
     let config = Config::load(&paths.config)?;
     let secrets = Secrets::new(paths.log_dir.join("credentials"));
     let catalog = Catalog::new(config.instances())?;
@@ -568,6 +574,7 @@ async fn run(paths: Paths) -> Result<()> {
     forward_audio_events(audio_events, messages.clone());
 
     let mut app = App::new(config.quality(), config.volume());
+    app.roomy_rows = config.roomy_rows();
     app.library = monochrome_core::Library::new(load_snapshot(&paths));
 
     match services.secrets.get(SESSION_TOKEN) {

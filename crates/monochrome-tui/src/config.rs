@@ -50,10 +50,11 @@ pub struct DeezerConfig {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub accent: String,
+    pub spacing: String,
 }
 
 impl Default for AccountConfig {
@@ -71,6 +72,15 @@ impl Default for CatalogConfig {
                 .iter()
                 .map(|(url, _)| (*url).to_string())
                 .collect(),
+        }
+    }
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            accent: String::new(),
+            spacing: "compact".into(),
         }
     }
 }
@@ -117,6 +127,10 @@ impl Config {
 
     pub fn set_quality(&mut self, quality: Quality) {
         self.playback.quality = quality.label().into();
+    }
+
+    pub fn roomy_rows(&self) -> bool {
+        self.ui.spacing.eq_ignore_ascii_case("roomy")
     }
 
     pub fn volume(&self) -> f32 {
@@ -221,6 +235,18 @@ mod tests {
     #[test]
     fn the_default_look_is_pure_monochrome() {
         assert!(Config::default().ui.accent.is_empty());
+    }
+
+    #[test]
+    fn rows_are_compact_unless_roomy_is_asked_for() {
+        let mut config = Config::default();
+        assert!(!config.roomy_rows());
+        config.ui.spacing = "roomy".into();
+        assert!(config.roomy_rows());
+        config.ui.spacing = "ROOMY".into();
+        assert!(config.roomy_rows());
+        config.ui.spacing = "nonsense".into();
+        assert!(!config.roomy_rows());
     }
 
     #[test]

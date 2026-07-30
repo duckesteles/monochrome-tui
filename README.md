@@ -56,6 +56,7 @@ Press `?` in the app. The short version:
 | `space` | pause |
 | `←` `→` | seek |
 | `+` `-` | volume |
+| `s` | shuffle |
 | `f` | save to library |
 | `Q` | quit |
 
@@ -79,7 +80,8 @@ quality = "lossless"   # low | high | lossless | hi-res
 volume  = 0.7
 
 [ui]
-accent = ""            # a colour name or #rrggbb; empty stays monochrome
+accent  = ""           # a colour name or #rrggbb; empty stays monochrome
+spacing = "compact"    # "roomy" puts a blank line between rows
 ```
 
 The interface never sets a background colour, so it inherits your terminal

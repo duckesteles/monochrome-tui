@@ -9,10 +9,17 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
     let action = input::resolve(key, app.focus);
 
     if app.show_help {
-        if matches!(action, Action::Quit) {
-            return vec![Effect::Quit];
+        match action {
+            Action::Quit => return vec![Effect::Quit],
+            Action::Down => app.scroll_help(1),
+            Action::Up => app.scroll_help(-1),
+            Action::HalfPageDown => app.scroll_help(8),
+            Action::HalfPageUp => app.scroll_help(-8),
+            Action::Top => app.help_scroll = 0,
+            Action::Bottom => app.scroll_help(i16::MAX),
+            Action::Back | Action::ToggleHelp | Action::OpenQueue => app.toggle_help(),
+            _ => {}
         }
-        app.show_help = false;
         return Vec::new();
     }
 
@@ -270,22 +277,64 @@ mod tests {
     }
 
     #[test]
-    fn the_help_overlay_opens_on_question_mark_and_any_key_closes_it() {
+    fn the_help_overlay_opens_on_question_mark_and_closes_on_escape() {
         let mut app = app();
         press(&mut app, KeyCode::Char('?'));
         assert!(app.show_help);
-        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Esc);
         assert!(!app.show_help);
     }
 
     #[test]
-    fn a_key_that_closes_the_help_does_nothing_else() {
+    fn question_mark_closes_the_help_it_opened() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('?'));
+        press(&mut app, KeyCode::Char('?'));
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn the_help_scrolls_instead_of_closing() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('?'));
+        press(&mut app, KeyCode::Down);
+        assert!(app.show_help, "moving must not dismiss the help");
+        assert_eq!(app.help_scroll, 1);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.help_scroll, 2);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.help_scroll, 1);
+    }
+
+    #[test]
+    fn the_help_cannot_be_scrolled_above_its_first_line() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('?'));
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn the_help_stops_at_its_last_line() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('?'));
+        press(&mut app, KeyCode::Char('G'));
+        let furthest = app.help_scroll;
+        press(&mut app, KeyCode::Char('G'));
+        assert_eq!(app.help_scroll, furthest);
+        assert!(furthest > 0);
+    }
+
+    #[test]
+    fn a_key_with_no_meaning_in_the_help_leaves_it_open() {
         let mut app = app();
         app.switch_tab(Tab::Library);
         press(&mut app, KeyCode::Char('?'));
         let effects = press(&mut app, KeyCode::Char('2'));
         assert!(effects.is_empty());
-        assert_eq!(app.tab, Tab::Library, "the key only dismissed the help");
+        assert!(app.show_help);
+        assert_eq!(app.tab, Tab::Library);
     }
 
     #[test]

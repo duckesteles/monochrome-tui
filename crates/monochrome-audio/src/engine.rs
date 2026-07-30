@@ -304,11 +304,13 @@ fn open(request: &PlayRequest, output: &Output) -> Result<Playback, String> {
         Some(hex) => {
             let key = crate::cenc::parse_key(hex)
                 .ok_or_else(|| "the gateway sent an unusable decryption key".to_string())?;
+            let decrypted = crate::cenc::FlacFromCenc::new(source, key);
+            let buffered = crate::spill::Spill::new(decrypted)
+                .map_err(|error| format!("cannot buffer the decrypted stream: {error}"))?;
             let mut flac_hint = Hint::new();
             flac_hint.with_extension("flac");
-            let decrypted = crate::cenc::FlacFromCenc::new(source, key);
             return prepare(
-                MediaSourceStream::new(Box::new(decrypted), MediaSourceStreamOptions::default()),
+                MediaSourceStream::new(Box::new(buffered), MediaSourceStreamOptions::default()),
                 output.sample_rate,
                 output.channels,
                 flac_hint,

@@ -191,6 +191,8 @@ pub struct App {
     pub muted_from: Option<f32>,
     pub verification_url: Option<String>,
     pub show_help: bool,
+    pub help_scroll: u16,
+    pub roomy_rows: bool,
     pub verification_input: String,
     pub verification_error: Option<String>,
     pub syncing: bool,
@@ -219,6 +221,8 @@ impl App {
             volume: volume.clamp(0.0, 1.0),
             muted_from: None,
             show_help: false,
+            help_scroll: 0,
+            roomy_rows: false,
             verification_url: None,
             verification_input: String::new(),
             verification_error: None,
@@ -662,7 +666,15 @@ impl App {
 
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+        self.help_scroll = 0;
         self.status = None;
+    }
+
+    pub fn scroll_help(&mut self, delta: i16) {
+        let lines = crate::help::line_count() as u16;
+        let furthest = lines.saturating_sub(1);
+        self.help_scroll =
+            (self.help_scroll as i32 + delta as i32).clamp(0, furthest as i32) as u16;
     }
 
     pub fn submit_verification(&mut self) -> Vec<Effect> {

@@ -33,7 +33,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, list: &mut ListState)
     frame.render_widget(rule(theme, area.width), chunks[2]);
 
     match app.focus {
-        _ if app.show_help => frame.render_widget(help(theme), chunks[3]),
+        _ if app.show_help => frame.render_widget(help(app, theme), chunks[3]),
         Focus::Login => frame.render_widget(login(app, theme), chunks[3]),
         Focus::Verification => frame.render_widget(verification(app, theme), chunks[3]),
         _ => render_list(frame, app, theme, list, chunks[3]),
@@ -105,7 +105,14 @@ fn render_list(frame: &mut Frame, app: &App, theme: &Theme, state: &mut ListStat
 
     let items: Vec<ListItem> = rows
         .iter()
-        .map(|row| ListItem::new(line_for(row, theme, width, playing)))
+        .map(|row| {
+            let line = line_for(row, theme, width, playing);
+            if app.roomy_rows {
+                ListItem::new(vec![line, Line::from("")])
+            } else {
+                ListItem::new(line)
+            }
+        })
         .collect();
 
     state.select(Some(app.cursor().min(rows.len().saturating_sub(1))));
@@ -322,7 +329,7 @@ fn status<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
     ]))
 }
 
-fn help<'a>(theme: &Theme) -> Paragraph<'a> {
+fn help<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
     let mut lines = vec![Line::from("")];
     for (group, entries) in crate::help::SHORTCUTS {
         lines.push(Line::from(Span::styled(
@@ -337,7 +344,11 @@ fn help<'a>(theme: &Theme) -> Paragraph<'a> {
         }
         lines.push(Line::from(""));
     }
-    Paragraph::new(lines)
+    lines.push(Line::from(Span::styled(
+        "   arrows scroll, esc or ? closes",
+        theme.dim(),
+    )));
+    Paragraph::new(lines).scroll((app.help_scroll, 0))
 }
 
 fn login<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {

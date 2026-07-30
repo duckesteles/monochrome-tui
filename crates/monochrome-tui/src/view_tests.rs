@@ -201,6 +201,48 @@ fn the_status_line_says_where_the_shortcuts_are() {
 }
 
 #[test]
+fn roomy_rows_put_a_blank_line_between_tracks() {
+    let mut app = app();
+    app.push(Screen::Album(album(vec![
+        track(1, "First"),
+        track(2, "Second"),
+    ])));
+
+    let tight = text(&draw(&app, 80, 24));
+    let first_tight = tight
+        .lines()
+        .position(|l| l.contains("First"))
+        .expect("first");
+    let second_tight = tight
+        .lines()
+        .position(|l| l.contains("Second"))
+        .expect("second");
+    assert_eq!(second_tight - first_tight, 1);
+
+    app.roomy_rows = true;
+    let roomy = text(&draw(&app, 80, 24));
+    let first = roomy
+        .lines()
+        .position(|l| l.contains("First"))
+        .expect("first");
+    let second = roomy
+        .lines()
+        .position(|l| l.contains("Second"))
+        .expect("second");
+    assert_eq!(second - first, 2);
+}
+
+#[test]
+fn the_help_overlay_can_be_scrolled() {
+    let mut app = app();
+    app.show_help = true;
+    let top = text(&draw(&app, 80, 14));
+    app.help_scroll = 6;
+    let scrolled = text(&draw(&app, 80, 14));
+    assert_ne!(top, scrolled, "scrolling should move the help");
+}
+
+#[test]
 fn the_help_overlay_lists_the_shortcuts_it_documents() {
     let mut app = app();
     app.show_help = true;
