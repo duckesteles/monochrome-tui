@@ -23,8 +23,15 @@ pub struct Spill {
 }
 
 impl Spill {
-    pub fn new<R: Read + Send + 'static>(mut inner: R) -> IoResult<Self> {
-        let (reader, _) = scratch_file()?;
+    pub fn new<R: Read + Send + 'static>(inner: R) -> IoResult<Self> {
+        Self::new_in(&scratch_dir(), inner)
+    }
+
+    pub fn new_in<R: Read + Send + 'static>(
+        directory: &std::path::Path,
+        mut inner: R,
+    ) -> IoResult<Self> {
+        let (reader, _) = scratch_file_in(directory)?;
         let writer = reader.try_clone()?;
         let progress = Arc::new(Progress {
             written: AtomicU64::new(0),
@@ -215,9 +222,8 @@ fn scratch_dir() -> std::path::PathBuf {
     )
 }
 
-fn scratch_file() -> IoResult<(File, std::path::PathBuf)> {
-    let directory = scratch_dir();
-    let _ = std::fs::create_dir_all(&directory);
+fn scratch_file_in(directory: &std::path::Path) -> IoResult<(File, std::path::PathBuf)> {
+    let _ = std::fs::create_dir_all(directory);
 
     for attempt in 0..64u32 {
         let path = directory.join(format!("monochrome-{}-{attempt}.audio", std::process::id()));
@@ -250,8 +256,33 @@ mod tests {
         (0..len).map(|i| (i % 251) as u8).collect()
     }
 
+    struct Scratch {
+        directory: std::path::PathBuf,
+    }
+
+    impl Scratch {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let directory = std::env::temp_dir().join(format!(
+                "monochrome-audio-test-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&directory);
+            Self { directory }
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
     fn spill(bytes: Vec<u8>) -> Spill {
-        Spill::new(std::io::Cursor::new(bytes)).expect("scratch file")
+        let scratch = Scratch::new();
+        Spill::new_in(&scratch.directory, std::io::Cursor::new(bytes)).expect("scratch file")
     }
 
     fn settled(bytes: Vec<u8>) -> Spill {
@@ -274,10 +305,14 @@ mod tests {
     #[test]
     fn reading_while_the_fetch_is_still_running_returns_intact_bytes() {
         let source: Vec<u8> = (0..400_000u32).map(|i| (i % 251) as u8).collect();
-        let mut spill = Spill::new(TrickleSource {
-            data: source.clone(),
-            offset: 0,
-        })
+        let scratch = Scratch::new();
+        let mut spill = Spill::new_in(
+            &scratch.directory,
+            TrickleSource {
+                data: source.clone(),
+                offset: 0,
+            },
+        )
         .expect("spill");
 
         let mut out = Vec::new();
@@ -361,7 +396,8 @@ mod tests {
 
     #[test]
     fn an_unfinished_stream_reports_no_length() {
-        let spill = Spill::new(SlowSource::new(1_000_000)).expect("spill");
+        let scratch = Scratch::new();
+        let spill = Spill::new_in(&scratch.directory, SlowSource::new(1_000_000)).expect("spill");
         assert!(!spill.is_seekable());
         assert_eq!(spill.byte_len(), None);
     }
@@ -382,7 +418,8 @@ mod tests {
 
     #[test]
     fn a_reader_waits_for_bytes_that_have_not_arrived_yet() {
-        let mut spill = Spill::new(SlowSource::new(4096)).expect("spill");
+        let scratch = Scratch::new();
+        let mut spill = Spill::new_in(&scratch.directory, SlowSource::new(4096)).expect("spill");
         let mut out = Vec::new();
         spill.read_to_end(&mut out).expect("read");
         assert_eq!(out.len(), 4096);
@@ -425,7 +462,8 @@ mod tests {
             counted: Arc::clone(&counter),
         };
 
-        let spill = Spill::new(source).expect("spill");
+        let scratch = Scratch::new();
+        let spill = Spill::new_in(&scratch.directory, source).expect("spill");
         std::thread::sleep(Duration::from_millis(40));
         drop(spill);
 
@@ -460,10 +498,15 @@ mod tests {
 
     #[test]
     fn the_scratch_file_is_unlinked_the_moment_it_is_opened() {
-        let (file, path) = scratch_file().expect("scratch file");
-        assert!(
-            !path.exists(),
-            "the scratch file is still visible at {}",
+        use std::os::unix::fs::MetadataExt;
+
+        let scratch = Scratch::new();
+        let (file, path) = scratch_file_in(&scratch.directory).expect("scratch file");
+        let links = file.metadata().expect("metadata").nlink();
+        assert_eq!(
+            links,
+            0,
+            "the scratch file at {} still has a name on disk",
             path.display()
         );
 

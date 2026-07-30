@@ -166,24 +166,20 @@ fn looks_secret(word: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("monochrome-secrets-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir.join("credentials")
-    }
+    use crate::testing::Scratch;
 
     #[test]
     fn a_value_written_to_the_fallback_can_be_read_back() {
-        let store = Secrets::new(scratch("roundtrip"));
+        let scratch = Scratch::new("roundtrip");
+        let store = Secrets::new(scratch.file("credentials"));
         store.write_fallback("a", Some("value")).expect("write");
         assert_eq!(store.read_fallback("a").as_deref(), Some("value"));
     }
 
     #[test]
     fn removing_a_key_leaves_the_others_alone() {
-        let store = Secrets::new(scratch("remove"));
+        let scratch = Scratch::new("remove");
+        let store = Secrets::new(scratch.file("credentials"));
         store.write_fallback("a", Some("1")).expect("write");
         store.write_fallback("b", Some("2")).expect("write");
         store.remove_fallback("a").expect("remove");
@@ -193,7 +189,8 @@ mod tests {
 
     #[test]
     fn the_fallback_file_disappears_when_it_empties() {
-        let path = scratch("empty");
+        let scratch = Scratch::new("empty");
+        let path = scratch.file("credentials");
         let store = Secrets::new(path.clone());
         store.write_fallback("a", Some("1")).expect("write");
         assert!(path.exists());
@@ -205,7 +202,8 @@ mod tests {
     #[test]
     fn the_fallback_file_is_private_to_the_user() {
         use std::os::unix::fs::PermissionsExt;
-        let path = scratch("mode");
+        let scratch = Scratch::new("mode");
+        let path = scratch.file("credentials");
         let store = Secrets::new(path.clone());
         store.write_fallback("a", Some("1")).expect("write");
         let mode = std::fs::metadata(&path)
@@ -217,7 +215,8 @@ mod tests {
 
     #[test]
     fn a_blank_stored_value_counts_as_missing() {
-        let store = Secrets::new(scratch("blank"));
+        let scratch = Scratch::new("blank");
+        let store = Secrets::new(scratch.file("credentials"));
         store.write_fallback("a", Some("")).expect("write");
         assert_eq!(store.read_fallback("a"), None);
     }
@@ -260,15 +259,7 @@ mod tests {
 #[cfg(test)]
 mod runtime_tests {
     use super::*;
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "monochrome-secrets-rt-{}-{name}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir.join("credentials")
-    }
+    use crate::testing::Scratch;
 
     fn unique(name: &str) -> String {
         format!("monochrome-test-{}-{name}", std::process::id())
@@ -277,7 +268,8 @@ mod runtime_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn secret_access_from_inside_the_async_runtime_does_not_panic() {
         let key = unique("inside");
-        let store = Secrets::new(scratch("inside-runtime"));
+        let scratch = Scratch::new("inside-runtime");
+        let store = Secrets::new(scratch.file("credentials"));
         store.set(&key, "value-from-a-task").expect("set");
         assert_eq!(store.get(&key).as_deref(), Some("value-from-a-task"));
         store.clear(&key);
@@ -287,7 +279,8 @@ mod runtime_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn secret_access_from_a_spawned_task_does_not_panic() {
         let key = unique("spawned");
-        let store = std::sync::Arc::new(Secrets::new(scratch("spawned")));
+        let scratch = Scratch::new("spawned");
+        let store = std::sync::Arc::new(Secrets::new(scratch.file("credentials")));
         let writer = std::sync::Arc::clone(&store);
         let written = key.clone();
         tokio::spawn(async move {
@@ -302,7 +295,8 @@ mod runtime_tests {
     #[test]
     fn secret_access_outside_any_runtime_does_not_panic() {
         let key = unique("outside");
-        let store = Secrets::new(scratch("outside"));
+        let scratch = Scratch::new("outside");
+        let store = Secrets::new(scratch.file("credentials"));
         store.set(&key, "plain").expect("set");
         assert_eq!(store.get(&key).as_deref(), Some("plain"));
         store.clear(&key);
@@ -312,7 +306,8 @@ mod runtime_tests {
     #[test]
     fn a_secret_survives_a_new_handle_to_the_same_store() {
         let key = unique("persist");
-        let path = scratch("persist");
+        let scratch = Scratch::new("persist");
+        let path = scratch.file("credentials");
         let first = Secrets::new(path.clone());
         first.set(&key, "kept").expect("set");
         drop(first);

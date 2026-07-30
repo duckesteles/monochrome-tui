@@ -88,55 +88,50 @@ fn write_file(path: &Path, contents: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("monochrome-paths-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir.join("file")
-    }
+    use crate::testing::Scratch;
 
     #[test]
     fn writing_creates_missing_directories() {
-        let path = scratch("nested");
+        let scratch = Scratch::new("nested");
+        let path = scratch.file("file");
         write_private(&path, b"hello").expect("write");
         assert_eq!(std::fs::read(&path).expect("read"), b"hello");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[cfg(unix)]
     #[test]
     fn files_are_created_private_to_the_user() {
         use std::os::unix::fs::PermissionsExt;
-        let path = scratch("mode");
+        let scratch = Scratch::new("mode");
+        let path = scratch.file("file");
         write_private(&path, b"secret").expect("write");
         let mode = std::fs::metadata(&path)
             .expect("metadata")
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[cfg(unix)]
     #[test]
     fn a_log_file_is_created_private_to_the_user() {
         use std::os::unix::fs::PermissionsExt;
-        let path = scratch("log");
+        let scratch = Scratch::new("log");
+        let path = scratch.file("file");
         create_private_file(&path).expect("create");
         let mode = std::fs::metadata(&path)
             .expect("metadata")
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[cfg(unix)]
     #[test]
     fn an_existing_world_readable_log_is_tightened() {
         use std::os::unix::fs::PermissionsExt;
-        let path = scratch("loose");
+        let scratch = Scratch::new("loose");
+        let path = scratch.file("file");
         std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
         std::fs::write(&path, b"old").expect("write");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
@@ -147,14 +142,14 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[cfg(unix)]
     #[test]
     fn state_directories_are_private_too() {
         use std::os::unix::fs::PermissionsExt;
-        let path = scratch("dir");
+        let scratch = Scratch::new("dir");
+        let path = scratch.file("file");
         let directory = path.parent().unwrap();
         create_private_dir(directory).expect("create");
         let mode = std::fs::metadata(directory)
@@ -162,39 +157,39 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o700, "mode was {:o}", mode & 0o777);
-        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
     fn discarding_removes_the_file() {
-        let path = scratch("discard");
+        let scratch = Scratch::new("discard");
+        let path = scratch.file("file");
         write_private(&path, b"a library and a listening history").expect("write");
         assert!(path.exists());
         discard(&path).expect("discard");
         assert!(!path.exists(), "signing out must leave nothing behind");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
     fn discarding_something_that_is_already_gone_is_not_an_error() {
-        let path = scratch("absent");
+        let scratch = Scratch::new("absent");
+        let path = scratch.file("file");
         assert!(discard(&path).is_ok());
     }
 
     #[test]
     fn rewriting_replaces_the_previous_contents() {
-        let path = scratch("replace");
+        let scratch = Scratch::new("replace");
+        let path = scratch.file("file");
         write_private(&path, b"first").expect("write");
         write_private(&path, b"second").expect("rewrite");
         assert_eq!(std::fs::read(&path).expect("read"), b"second");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
     fn no_temporary_file_is_left_behind() {
-        let path = scratch("temp");
+        let scratch = Scratch::new("temp");
+        let path = scratch.file("file");
         write_private(&path, b"data").expect("write");
         assert!(!path.with_extension("tmp").exists());
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

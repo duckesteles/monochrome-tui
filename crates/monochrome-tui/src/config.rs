@@ -214,6 +214,7 @@ impl Paths {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::Scratch;
 
     #[test]
     fn the_default_config_points_at_the_official_services() {
@@ -293,16 +294,15 @@ mod tests {
 
     #[test]
     fn a_missing_config_file_yields_the_defaults() {
-        let path = std::env::temp_dir().join("monochrome-tui-absent.toml");
-        let _ = std::fs::remove_file(&path);
-        let config = Config::load(&path).expect("defaults");
+        let scratch = Scratch::new("absent");
+        let config = Config::load(&scratch.file("config.toml")).expect("defaults");
         assert_eq!(config.playback.quality, "lossless");
     }
 
     #[test]
     fn a_config_file_round_trips() {
-        let dir = std::env::temp_dir().join(format!("monochrome-tui-test-{}", std::process::id()));
-        let path = dir.join("config.toml");
+        let scratch = Scratch::new("roundtrip");
+        let path = scratch.file("config.toml");
         let mut config = Config::default();
         config.playback.volume = 0.42;
         config.amazon.bypass_token = "abc".into();
@@ -311,7 +311,6 @@ mod tests {
         let loaded = Config::load(&path).expect("load");
         assert_eq!(loaded.playback.volume, 0.42);
         assert_eq!(loaded.amazon.bypass_token, "abc");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
