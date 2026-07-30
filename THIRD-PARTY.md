@@ -1,5 +1,23 @@
 # Third-party licences
 
+## Monochrome
+
+This client speaks to the same services as
+[monochrome-music/monochrome](https://github.com/monochrome-music/monochrome),
+which is Apache-2.0, Copyright 2026 Monochrome Team.
+
+No code from that project is present here. Its source was read to learn the
+service endpoints, the shape of the stored library document, and the parameters
+of the encryption scheme the audio gateway uses, all of which had to match
+exactly for the two clients to share an account. Endpoint addresses and wire
+formats are facts about an interface rather than expression, so this is not a
+derivative work and the project is licensed independently. The attribution is
+here because the project would not exist without theirs.
+
+Monochrome ships no NOTICE file, so there is none to reproduce.
+
+## Rust crates
+
 This project links the Rust crates below. Their licences are listed here so a
 binary build can be distributed with the notices its dependencies require.
 

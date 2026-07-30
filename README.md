@@ -92,6 +92,13 @@ theme and transparency as-is.
 Visualisers, themes, listening parties, equaliser, podcasts, downloads,
 scrobbling, local files, lyrics, OAuth sign-in.
 
+## Credits
+
+Built against the services of
+[monochrome-music/monochrome](https://github.com/monochrome-music/monochrome)
+(Apache-2.0), which this client shares an account and a library with. None of
+its code is used here; see [THIRD-PARTY.md](THIRD-PARTY.md).
+
 ## Licence
 
 MIT. Not affiliated with Monochrome, Tidal, Amazon or Deezer.
