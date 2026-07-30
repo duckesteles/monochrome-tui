@@ -232,6 +232,20 @@ impl Catalog {
         Ok(envelope.data.into_core())
     }
 
+    pub async fn tracks(&self, ids: &[u64]) -> Vec<Track> {
+        let mut found = Vec::with_capacity(ids.len());
+        for batch in ids.chunks(8) {
+            let requests = batch.iter().map(|id| self.track(*id));
+            found.extend(
+                futures_util::future::join_all(requests)
+                    .await
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        found
+    }
+
     pub async fn album(&self, id: u64) -> ApiResult<Album> {
         let envelope: Envelope<WireAlbum> = self
             .fetch_json(&format!("/album/?id={id}&limit=500"), None)

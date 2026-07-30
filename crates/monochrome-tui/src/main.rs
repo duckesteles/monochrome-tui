@@ -437,6 +437,7 @@ async fn play_once(paths: Paths, query: String) -> Result<()> {
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .try_init();
     }
+
     let config = Config::load(&paths.config)?;
     let secrets = Secrets::new(paths.log_dir.join("credentials"));
     let catalog = Catalog::new(config.instances())?;
@@ -445,110 +446,134 @@ async fn play_once(paths: Paths, query: String) -> Result<()> {
         resolver.cache_jwt(jwt);
     }
 
-    let track = catalog
-        .search_tracks(&query)
-        .await?
-        .into_iter()
-        .next()
-        .context("nothing matched that search")?;
-    println!("track     {} \u{b7} {}", track.title, track.artist_name());
-
-    let handle = resolver.resolve(&track, config.quality()).await?;
-    println!("source    {}", handle.source.label());
-    println!(
-        "encrypted {}",
-        if handle.decryption_key.is_some() {
-            "yes, decrypting locally"
-        } else {
-            "no"
-        }
-    );
-
     let (player, events) = Player::spawn();
     player.set_volume(0.0);
-    let started_at = std::time::Instant::now();
-    player.play(PlayRequest {
-        url: handle.url,
-        headers: handle.headers,
-        replay_gain: track.replay_gain,
-        peak: track.peak,
-        decryption_key: handle.decryption_key,
-    });
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(40);
-    let mut furthest = 0.0f64;
-    let mut seek_sent = false;
-    let mut seek_back_worked = false;
+    let wanted: Vec<&str> = query
+        .split(';')
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .collect();
+    let switching = wanted.len() > 1;
 
-    while std::time::Instant::now() < deadline {
-        match events.recv_timeout(Duration::from_millis(500)) {
-            Ok(monochrome_audio::Event::Started {
-                duration,
-                sample_rate,
-                channels,
-                codec,
-            }) => {
-                println!(
-                    "latency   {:.2} s to first audio",
-                    started_at.elapsed().as_secs_f64()
-                );
-                println!(
-                    "started   {codec} {sample_rate} Hz, {channels} channels, {}",
-                    duration
-                        .map(|value| format!("{value:.1} s"))
-                        .unwrap_or_else(|| "length unknown".into())
-                );
-            }
-            Ok(monochrome_audio::Event::Output {
-                sample_rate,
-                channels,
-                resampling,
-            }) => println!(
-                "output    {sample_rate} Hz, {channels} channels, {}",
-                if resampling {
-                    "RESAMPLED"
+    for (index, wanted) in wanted.iter().enumerate() {
+        let track = catalog
+            .search_tracks(wanted)
+            .await?
+            .into_iter()
+            .next()
+            .context("nothing matched that search")?;
+        println!("track     {} \u{b7} {}", track.title, track.artist_name());
+
+        let handle = resolver.resolve(&track, config.quality()).await?;
+        if index == 0 {
+            println!("source    {}", handle.source.label());
+            println!(
+                "encrypted {}",
+                if handle.decryption_key.is_some() {
+                    "yes, decrypting locally"
                 } else {
-                    "bit exact, no resampling"
+                    "no"
                 }
-            ),
-            Ok(monochrome_audio::Event::Position(position)) => {
-                if seek_sent && position < 3.0 {
-                    seek_back_worked = true;
-                    break;
+            );
+        }
+
+        let asked_at = std::time::Instant::now();
+        player.play(PlayRequest {
+            url: handle.url,
+            headers: handle.headers,
+            replay_gain: track.replay_gain,
+            peak: track.peak,
+            decryption_key: handle.decryption_key,
+        });
+
+        let mut started = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(40);
+        let mut furthest = 0.0f64;
+        let mut seek_sent = false;
+        let mut seek_back_worked = false;
+
+        while std::time::Instant::now() < deadline {
+            match events.recv_timeout(Duration::from_millis(200)) {
+                Ok(monochrome_audio::Event::Started {
+                    duration,
+                    sample_rate,
+                    channels,
+                    codec,
+                }) => {
+                    started = true;
+                    println!(
+                        "{:<9} {:.2} s to first audio",
+                        if index == 0 { "latency" } else { "switch" },
+                        asked_at.elapsed().as_secs_f64()
+                    );
+                    println!(
+                        "started   {codec} {sample_rate} Hz, {channels} channels, {}",
+                        duration
+                            .map(|value| format!("{value:.1} s"))
+                            .unwrap_or_else(|| "length unknown".into())
+                    );
+                    if switching {
+                        break;
+                    }
                 }
-                furthest = furthest.max(position);
-                if furthest > 6.0 && !seek_sent {
-                    seek_sent = true;
-                    player.seek_to(1.0);
+                Ok(monochrome_audio::Event::Output {
+                    sample_rate,
+                    channels,
+                    resampling,
+                }) => println!(
+                    "output    {sample_rate} Hz, {channels} channels, {}",
+                    if resampling {
+                        "RESAMPLED"
+                    } else {
+                        "bit exact, no resampling"
+                    }
+                ),
+                Ok(monochrome_audio::Event::Position(position)) => {
+                    if seek_sent && position < 3.0 {
+                        seek_back_worked = true;
+                        break;
+                    }
+                    furthest = furthest.max(position);
+                    if furthest > 6.0 && !seek_sent {
+                        seek_sent = true;
+                        player.seek_to(1.0);
+                    }
                 }
+                Ok(monochrome_audio::Event::Failed(reason)) => {
+                    println!("FAILED    {}", secrets::redact(&reason));
+                    return Ok(());
+                }
+                Ok(monochrome_audio::Event::Finished) => break,
+                Ok(_) => {}
+                Err(_) => {}
             }
-            Ok(monochrome_audio::Event::Failed(reason)) => {
-                println!("FAILED    {}", secrets::redact(&reason));
-                return Ok(());
-            }
-            Ok(monochrome_audio::Event::Finished) => break,
-            Ok(_) => {}
-            Err(_) => {}
+        }
+
+        if !started {
+            println!("FAILED    nothing started within the time allowed");
+            return Ok(());
+        }
+        if seek_sent {
+            println!(
+                "seek back {}",
+                if seek_back_worked {
+                    "works"
+                } else {
+                    "DID NOT WORK"
+                }
+            );
+        }
+        if switching && index + 1 < wanted_len(&query) {
+            std::thread::sleep(Duration::from_millis(600));
         }
     }
 
-    if seek_sent {
-        println!(
-            "seek back {}",
-            if seek_back_worked {
-                "works"
-            } else {
-                "DID NOT WORK"
-            }
-        );
-    }
-
-    if furthest > 0.0 {
-        println!("played    {furthest:.1} seconds of audio");
-    } else {
-        println!("played    nothing came out");
-    }
     Ok(())
+}
+
+fn wanted_len(query: &str) -> usize {
+    query.split(';').filter(|q| !q.trim().is_empty()).count()
 }
 
 async fn run(paths: Paths) -> Result<()> {
@@ -650,7 +675,10 @@ async fn run(paths: Paths) -> Result<()> {
                     push_sync(&mut app, &services, &messages, &paths);
                     redraw = true;
                 }
-                Vec::new()
+                match app.tracks_missing_a_length(24) {
+                    wanted if wanted.is_empty() => Vec::new(),
+                    wanted => vec![Effect::LoadTrackDetails(wanted)],
+                }
             }
         };
 
@@ -736,6 +764,21 @@ fn perform(
                         })));
                     }
                     Err(error) => report(&messages, error),
+                }
+            });
+        }
+        Effect::LoadTrackDetails(ids) => {
+            let services = services.clone();
+            let messages = messages.clone();
+            tokio::spawn(async move {
+                let details = services.catalog.tracks(&ids).await;
+                tracing::debug!(
+                    asked = ids.len(),
+                    learned = details.len(),
+                    "filled in track lengths"
+                );
+                if !details.is_empty() {
+                    let _ = messages.send(Message::TrackDetails(details));
                 }
             });
         }

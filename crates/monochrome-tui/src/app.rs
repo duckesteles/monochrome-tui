@@ -3,6 +3,7 @@ use monochrome_api::auth::User;
 use monochrome_core::library::{HISTORY_THRESHOLD_SECS, SyncDocument};
 use monochrome_core::model::{Album, Artist, FavoriteKind, Playlist, Quality, Track};
 use monochrome_core::{Library, Queue, Repeat};
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +122,7 @@ pub struct NowPlaying {
     pub source: Option<String>,
     pub format: Option<String>,
     pub recorded: bool,
+    pub chosen_by_hand: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,6 +131,7 @@ pub enum Effect {
     LoadAlbum(u64),
     LoadArtist(u64),
     LoadPlaylist(String),
+    LoadTrackDetails(Vec<u64>),
     Play(Box<Track>),
     Pause,
     Resume,
@@ -149,6 +152,7 @@ pub enum Message {
     Album(Box<Album>),
     Artist(Box<ArtistPage>),
     Playlist(Box<Playlist>, Vec<Track>),
+    TrackDetails(Vec<Track>),
     Sync(Box<SyncDocument>),
     SignedIn(Box<User>),
     SignInFailed(String),
@@ -193,6 +197,8 @@ pub struct App {
     pub show_help: bool,
     pub help_scroll: u16,
     pub roomy_rows: bool,
+    lengths: HashMap<u64, u32>,
+    asked_about: HashSet<u64>,
     pub verification_input: String,
     pub verification_error: Option<String>,
     pub syncing: bool,
@@ -223,6 +229,8 @@ impl App {
             show_help: false,
             help_scroll: 0,
             roomy_rows: false,
+            lengths: HashMap::new(),
+            asked_about: HashSet::new(),
             verification_url: None,
             verification_input: String::new(),
             verification_error: None,
@@ -306,7 +314,10 @@ impl App {
         match self.tab {
             Tab::Library => match self.section {
                 LibrarySection::Tracks => rows_or_empty(
-                    self.library.favorite_tracks().into_iter().map(Row::Track),
+                    self.library
+                        .favorite_tracks()
+                        .into_iter()
+                        .map(|track| Row::Track(self.with_known_length(track))),
                     "no saved tracks yet",
                 ),
                 LibrarySection::Albums => rows_or_empty(
@@ -326,11 +337,18 @@ impl App {
                 "no saved playlists yet",
             ),
             Tab::Recent => rows_or_empty(
-                self.library.history().into_iter().map(Row::Track),
+                self.library
+                    .history()
+                    .into_iter()
+                    .map(|track| Row::Track(self.with_known_length(track))),
                 "nothing played yet",
             ),
             Tab::Queue => rows_or_empty(
-                self.queue.items().iter().cloned().map(Row::Track),
+                self.queue
+                    .items()
+                    .iter()
+                    .cloned()
+                    .map(|track| Row::Track(self.with_known_length(track))),
                 "the queue is empty",
             ),
             Tab::Search => {
@@ -371,6 +389,32 @@ impl App {
                 rows
             }
         }
+    }
+
+    fn with_known_length(&self, mut track: Track) -> Track {
+        if track.duration == 0
+            && let Some(length) = self.lengths.get(&track.id)
+        {
+            track.duration = *length;
+        }
+        track
+    }
+
+    pub fn tracks_missing_a_length(&mut self, limit: usize) -> Vec<u64> {
+        let wanted: Vec<u64> = self
+            .rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                Row::Track(track) if track.duration == 0 => Some(track.id),
+                _ => None,
+            })
+            .filter(|id| !self.asked_about.contains(id))
+            .take(limit)
+            .collect();
+        for id in &wanted {
+            self.asked_about.insert(*id);
+        }
+        wanted
     }
 
     pub fn selected_row(&self) -> Option<Row> {
@@ -518,16 +562,18 @@ impl App {
             .unwrap_or(0);
         let seed = (self.clock)();
         self.queue.replace(tracks, start, seed);
-        self.start_current()
+        self.start_current(true)
     }
 
-    fn start_current(&mut self) -> Vec<Effect> {
+    fn start_current(&mut self, chosen_by_hand: bool) -> Vec<Effect> {
         match self.queue.current().cloned() {
             Some(track) => {
+                let length = (track.duration > 0).then_some(track.duration as f64);
                 self.now = NowPlaying {
                     track: Some(track.clone()),
-                    duration: Some(track.duration as f64),
+                    duration: length,
                     loading: true,
+                    chosen_by_hand,
                     ..Default::default()
                 };
                 vec![Effect::Play(Box::new(track))]
@@ -538,7 +584,7 @@ impl App {
 
     pub fn play_next(&mut self, manual: bool) -> Vec<Effect> {
         if self.queue.next(manual).is_some() {
-            self.start_current()
+            self.start_current(manual)
         } else {
             self.now = NowPlaying::default();
             vec![Effect::Stop]
@@ -550,7 +596,7 @@ impl App {
             return vec![Effect::Seek(0.0)];
         }
         if self.queue.previous().is_some() {
-            self.start_current()
+            self.start_current(true)
         } else {
             Vec::new()
         }
@@ -725,6 +771,14 @@ impl App {
                 self.replace_top(Screen::Artist(page));
                 Vec::new()
             }
+            Message::TrackDetails(details) => {
+                for track in details {
+                    if track.duration > 0 {
+                        self.lengths.insert(track.id, track.duration);
+                    }
+                }
+                Vec::new()
+            }
             Message::Playlist(playlist, tracks) => {
                 self.replace_top(Screen::Playlist(*playlist, tracks));
                 Vec::new()
@@ -809,11 +863,11 @@ impl App {
             Message::PlaybackFailed(reason) => {
                 self.status = Some(reason);
                 self.now.loading = false;
-                if self.queue.has_next() {
-                    self.play_next(false)
-                } else {
+                if self.now.chosen_by_hand || !self.queue.has_next() {
                     self.now = NowPlaying::default();
                     Vec::new()
+                } else {
+                    self.play_next(false)
                 }
             }
         }

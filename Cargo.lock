@@ -1676,6 +1676,7 @@ name = "monochrome-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-util",
  "monochrome-core",
  "rand 0.9.5",
  "reqwest",

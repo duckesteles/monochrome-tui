@@ -264,6 +264,96 @@ fn the_help_overlay_covers_the_list_rather_than_squeezing_it() {
     assert!(rendered.contains("play or open"));
 }
 
+fn highlighted_row(buffer: &ratatui::buffer::Buffer) -> Option<String> {
+    let area = *buffer.area();
+    for y in 0..area.height {
+        let reversed = (0..area.width).any(|x| {
+            buffer[(x, y)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        });
+        if reversed {
+            let line: String = (0..area.width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect();
+            return Some(line.trim().to_string());
+        }
+    }
+    None
+}
+
+#[test]
+fn the_highlighted_row_is_the_one_that_plays() {
+    let mut app = app();
+    let listing: Vec<_> = (1..=6)
+        .map(|id| track(id, &format!("Track number {id}")))
+        .collect();
+    app.push(Screen::Album(album(listing)));
+
+    for step in 0..5 {
+        app.cursor_to_start();
+        app.move_cursor(step);
+
+        let shown = highlighted_row(&draw(&app, 80, 24)).expect("a row is highlighted");
+        let selected = match app.selected_row().expect("a row is selected") {
+            Row::Track(chosen) => chosen.title,
+            other => panic!("expected a track, got {other:?}"),
+        };
+
+        assert!(
+            shown.contains(&selected),
+            "row {step}: the screen highlights {shown:?} but enter would play {selected:?}"
+        );
+    }
+}
+
+#[test]
+fn the_highlighted_row_is_the_one_that_plays_when_rows_are_roomy() {
+    let mut app = app();
+    app.roomy_rows = true;
+    let listing: Vec<_> = (1..=6)
+        .map(|id| track(id, &format!("Track number {id}")))
+        .collect();
+    app.push(Screen::Album(album(listing)));
+
+    for step in 0..5 {
+        app.cursor_to_start();
+        app.move_cursor(step);
+
+        let shown = highlighted_row(&draw(&app, 80, 24)).expect("a row is highlighted");
+        let selected = match app.selected_row().expect("a row is selected") {
+            Row::Track(chosen) => chosen.title,
+            other => panic!("expected a track, got {other:?}"),
+        };
+
+        assert!(
+            shown.contains(&selected),
+            "row {step}: the screen highlights {shown:?} but enter would play {selected:?}"
+        );
+    }
+}
+
+#[test]
+fn the_highlighted_row_is_the_one_that_plays_in_a_scrolled_list() {
+    let mut app = app();
+    let listing: Vec<_> = (1..=60)
+        .map(|id| track(id, &format!("Track number {id}")))
+        .collect();
+    app.push(Screen::Album(album(listing)));
+    app.cursor_to_start();
+    app.move_cursor(45);
+
+    let shown = highlighted_row(&draw(&app, 80, 24)).expect("a row is highlighted");
+    let selected = match app.selected_row().expect("a row is selected") {
+        Row::Track(chosen) => chosen.title,
+        other => panic!("expected a track, got {other:?}"),
+    };
+    assert!(
+        shown.contains(&selected),
+        "the screen highlights {shown:?} but enter would play {selected:?}"
+    );
+}
+
 #[test]
 fn an_empty_screen_explains_itself() {
     let rendered = text(&draw(&app(), 80, 24));

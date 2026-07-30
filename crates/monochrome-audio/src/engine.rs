@@ -347,7 +347,8 @@ fn prepare(
             },
             &MetadataOptions::default(),
         )
-        .map_err(|_| {
+        .map_err(|error| {
+            tracing::debug!(%error, "the probe could not identify the stream");
             "this stream is not audio the client can read. the gateway may have returned an \
              encrypted or fragmented file"
                 .to_string()

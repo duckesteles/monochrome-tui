@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
+use std::io::{Read, Result as IoResult, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -24,8 +24,8 @@ pub struct Spill {
 
 impl Spill {
     pub fn new<R: Read + Send + 'static>(mut inner: R) -> IoResult<Self> {
-        let reader = scratch_file()?;
-        let mut writer = reader.try_clone()?;
+        let (reader, _) = scratch_file()?;
+        let writer = reader.try_clone()?;
         let progress = Arc::new(Progress {
             written: AtomicU64::new(0),
             drained: AtomicBool::new(false),
@@ -46,9 +46,7 @@ impl Spill {
                     match inner.read(&mut scratch) {
                         Ok(0) => break,
                         Ok(read) => {
-                            if writer.seek(SeekFrom::Start(offset)).is_err()
-                                || writer.write_all(&scratch[..read]).is_err()
-                            {
+                            if write_at(&writer, offset, &scratch[..read]).is_err() {
                                 filling.failed.store(true, Ordering::Release);
                                 break;
                             }
@@ -108,8 +106,7 @@ impl Read for Spill {
             return Ok(0);
         }
         let available = (written - self.position).min(buffer.len() as u64) as usize;
-        self.reader.seek(SeekFrom::Start(self.position))?;
-        let read = self.reader.read(&mut buffer[..available])?;
+        let read = read_at(&self.reader, self.position, &mut buffer[..available])?;
         self.position += read as u64;
         Ok(read)
     }
@@ -155,6 +152,44 @@ impl MediaSource for Spill {
     }
 }
 
+#[cfg(unix)]
+fn write_at(file: &File, offset: u64, data: &[u8]) -> IoResult<()> {
+    use std::os::unix::fs::FileExt;
+    let mut written = 0usize;
+    while written < data.len() {
+        match file.write_at(&data[written..], offset + written as u64)? {
+            0 => {
+                return Err(std::io::Error::other(
+                    "the scratch file stopped accepting data",
+                ));
+            }
+            wrote => written += wrote,
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_at(file: &File, offset: u64, buffer: &mut [u8]) -> IoResult<usize> {
+    use std::os::unix::fs::FileExt;
+    file.read_at(buffer, offset)
+}
+
+#[cfg(not(unix))]
+fn write_at(file: &File, offset: u64, data: &[u8]) -> IoResult<()> {
+    use std::io::Write;
+    let mut handle = file.try_clone()?;
+    handle.seek(SeekFrom::Start(offset))?;
+    handle.write_all(data)
+}
+
+#[cfg(not(unix))]
+fn read_at(file: &File, offset: u64, buffer: &mut [u8]) -> IoResult<usize> {
+    let mut handle = file.try_clone()?;
+    handle.seek(SeekFrom::Start(offset))?;
+    handle.read(buffer)
+}
+
 impl Drop for Spill {
     fn drop(&mut self) {
         self.progress.cancelled.store(true, Ordering::Release);
@@ -180,7 +215,7 @@ fn scratch_dir() -> std::path::PathBuf {
     )
 }
 
-fn scratch_file() -> IoResult<File> {
+fn scratch_file() -> IoResult<(File, std::path::PathBuf)> {
     let directory = scratch_dir();
     let _ = std::fs::create_dir_all(&directory);
 
@@ -196,7 +231,7 @@ fn scratch_file() -> IoResult<File> {
         match options.open(&path) {
             Ok(file) => {
                 let _ = std::fs::remove_file(&path);
-                return Ok(file);
+                return Ok((file, path));
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
@@ -234,6 +269,39 @@ mod tests {
         let mut out = Vec::new();
         spill.read_to_end(&mut out).expect("read");
         assert_eq!(out, source);
+    }
+
+    #[test]
+    fn reading_while_the_fetch_is_still_running_returns_intact_bytes() {
+        let source: Vec<u8> = (0..400_000u32).map(|i| (i % 251) as u8).collect();
+        let mut spill = Spill::new(TrickleSource {
+            data: source.clone(),
+            offset: 0,
+        })
+        .expect("spill");
+
+        let mut out = Vec::new();
+        spill.read_to_end(&mut out).expect("read");
+        assert_eq!(out.len(), source.len());
+        assert_eq!(out, source, "the reader and the fetch corrupted each other");
+    }
+
+    struct TrickleSource {
+        data: Vec<u8>,
+        offset: usize,
+    }
+
+    impl Read for TrickleSource {
+        fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+            if self.offset >= self.data.len() {
+                return Ok(0);
+            }
+            std::thread::sleep(Duration::from_micros(200));
+            let take = buffer.len().min(4096).min(self.data.len() - self.offset);
+            buffer[..take].copy_from_slice(&self.data[self.offset..self.offset + take]);
+            self.offset += take;
+            Ok(take)
+        }
     }
 
     #[test]
@@ -391,21 +459,18 @@ mod tests {
     }
 
     #[test]
-    fn the_scratch_file_is_not_left_on_disk() {
-        let spill = settled(data(16));
-        let directory = scratch_dir();
-        let leftovers: Vec<_> = std::fs::read_dir(&directory)
-            .expect("listing")
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(&format!("monochrome-{}-", std::process::id()))
-            })
-            .collect();
-        assert!(leftovers.is_empty(), "a scratch file was left behind");
-        drop(spill);
+    fn the_scratch_file_is_unlinked_the_moment_it_is_opened() {
+        let (file, path) = scratch_file().expect("scratch file");
+        assert!(
+            !path.exists(),
+            "the scratch file is still visible at {}",
+            path.display()
+        );
+
+        write_at(&file, 0, b"audio").expect("write");
+        let mut out = [0u8; 5];
+        assert_eq!(read_at(&file, 0, &mut out).expect("read"), 5);
+        assert_eq!(&out, b"audio", "an unlinked file is still usable");
     }
 
     struct SlowSource {

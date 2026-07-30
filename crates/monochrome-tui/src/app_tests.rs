@@ -286,9 +286,41 @@ fn a_playback_failure_moves_on_to_the_next_track() {
     app.push(Screen::Album(album(1, vec![track(1), track(2)])));
     app.cursor_to_start();
     app.open_selected();
+    app.apply(Message::PlaybackFinished);
     let effects = app.apply(Message::PlaybackFailed("no source".into()));
     assert_eq!(app.status.as_deref(), Some("no source"));
+    assert!(effects.is_empty());
+}
+
+#[test]
+fn a_track_the_listener_picked_is_never_silently_replaced_by_another() {
+    let mut app = app();
+    app.push(Screen::Album(album(1, vec![track(1), track(2), track(3)])));
+    app.cursor_to_start();
+    app.open_selected();
+    assert_eq!(app.queue.current().expect("current").id, 1);
+
+    let effects = app.apply(Message::PlaybackFailed("no source".into()));
+    assert!(
+        effects.is_empty(),
+        "picking a track and getting a different one is worse than getting nothing"
+    );
+    assert!(app.now.track.is_none());
+    assert_eq!(app.status.as_deref(), Some("no source"));
+}
+
+#[test]
+fn a_track_that_started_on_its_own_still_gives_way_to_the_next() {
+    let mut app = app();
+    app.push(Screen::Album(album(1, vec![track(1), track(2), track(3)])));
+    app.cursor_to_start();
+    app.open_selected();
+    app.apply(Message::PlaybackFinished);
+    assert_eq!(app.queue.current().expect("current").id, 2);
+
+    let effects = app.apply(Message::PlaybackFailed("unavailable".into()));
     assert!(matches!(effects.first(), Some(Effect::Play(_))));
+    assert_eq!(app.queue.current().expect("current").id, 3);
 }
 
 #[test]
@@ -662,6 +694,74 @@ fn the_queue_tab_shows_what_is_queued() {
     app.queue.replace(vec![track(1), track(2)], 0, 1);
     app.switch_tab(Tab::Queue);
     assert_eq!(app.rows().len(), 2);
+}
+
+#[test]
+fn tracks_without_a_stored_length_are_asked_about_once() {
+    let mut app = app();
+    for id in 1..=3 {
+        let mut saved = track(id);
+        saved.duration = 0;
+        app.library.set_favorite_track(&saved, true, 1_000 + id);
+    }
+
+    let wanted = app.tracks_missing_a_length(24);
+    assert_eq!(wanted.len(), 3);
+    assert!(
+        app.tracks_missing_a_length(24).is_empty(),
+        "asking twice for the same track wastes a request"
+    );
+}
+
+#[test]
+fn a_length_that_arrives_later_is_shown_on_the_row() {
+    let mut app = app();
+    let mut saved = track(7);
+    saved.duration = 0;
+    app.library.set_favorite_track(&saved, true, 1_000);
+
+    match &app.rows()[0] {
+        Row::Track(shown) => assert_eq!(shown.duration, 0),
+        other => panic!("expected a track, got {other:?}"),
+    }
+
+    let mut detailed = track(7);
+    detailed.duration = 213;
+    app.apply(Message::TrackDetails(vec![detailed]));
+
+    match &app.rows()[0] {
+        Row::Track(shown) => assert_eq!(shown.duration, 213),
+        other => panic!("expected a track, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_length_the_catalog_does_not_know_is_not_cached() {
+    let mut app = app();
+    let mut saved = track(9);
+    saved.duration = 0;
+    app.library.set_favorite_track(&saved, true, 1_000);
+
+    let mut empty = track(9);
+    empty.duration = 0;
+    app.apply(Message::TrackDetails(vec![empty]));
+
+    match &app.rows()[0] {
+        Row::Track(shown) => assert_eq!(shown.duration, 0),
+        other => panic!("expected a track, got {other:?}"),
+    }
+}
+
+#[test]
+fn only_a_bounded_number_of_lengths_is_requested_at_a_time() {
+    let mut app = app();
+    for id in 1..=40 {
+        let mut saved = track(id);
+        saved.duration = 0;
+        app.library.set_favorite_track(&saved, true, 1_000 + id);
+    }
+    assert_eq!(app.tracks_missing_a_length(24).len(), 24);
+    assert_eq!(app.tracks_missing_a_length(24).len(), 16);
 }
 
 #[test]
