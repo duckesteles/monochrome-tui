@@ -472,15 +472,13 @@ fn start_playback(
             }
             Err(ApiError::CredentialRejected) => {
                 let _ = messages.send(Message::VerificationFailed(
-                    "the stored amazon token expired. copy a fresh one from monochrome.tf and \
-                     paste it below."
-                        .into(),
+                    "the stored amazon token expired. the browser check will get a new one.".into(),
                 ));
             }
             Err(ApiError::TurnstileRequired) if !allow_bridge => {
                 let _ = messages.send(Message::VerificationFailed(
-                    "the amazon gateway still refuses the token. paste a fresh one from \
-                     monochrome.tf, or set a bypass token in the config."
+                    "the amazon gateway still refuses the token. try the browser check \
+                     again, or set a bypass token in the config."
                         .into(),
                 ));
             }
@@ -535,10 +533,10 @@ async fn explain_rejection(token: &str, services: &Arc<Services>) -> String {
         let age = claims.expires_at.map(|exp| now.saturating_sub(exp) / 60);
         return match age {
             Some(minutes) => format!(
-                "that token expired {minutes} minutes ago. these last about an hour, so copy a \
-                 fresh one from monochrome.tf."
+                "that token expired {minutes} minutes ago. these last about an hour, so run \
+                 the browser check again."
             ),
-            None => "that token has expired. copy a fresh one from monochrome.tf.".into(),
+            None => "that token has expired. run the browser check again.".into(),
         };
     }
 

@@ -44,12 +44,27 @@ impl std::error::Error for ApiError {}
 
 impl From<reqwest::Error> for ApiError {
     fn from(error: reqwest::Error) -> Self {
+        let detail = describe_chain(&error);
         if error.is_decode() {
-            ApiError::Decode(error.to_string())
+            ApiError::Decode(detail)
         } else {
-            ApiError::Network(error.to_string())
+            ApiError::Network(detail)
         }
     }
+}
+
+fn describe_chain(error: &dyn std::error::Error) -> String {
+    let mut detail = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !detail.contains(&text) {
+            detail.push_str(": ");
+            detail.push_str(&text);
+        }
+        source = cause.source();
+    }
+    detail
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;

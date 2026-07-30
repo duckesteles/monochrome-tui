@@ -393,50 +393,25 @@ fn verification<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
         Line::from(""),
     ];
 
-    match &app.verification_error {
-        Some(reason) => {
-            lines.push(Line::from(Span::styled(
-                format!("   {reason}"),
-                theme.base(),
-            )));
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "   paste a token from the web app instead:",
-                theme.dim(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "   1. open monochrome.tf in a browser and play anything",
-                theme.dim(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "   2. in the browser console run",
-                theme.dim(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "      copy(localStorage.getItem('amazon_turnstile_jwt'))",
-                theme.base(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "   3. paste it below and press enter",
-                theme.dim(),
-            )));
-        }
-        None => {
-            let url = app.verification_url.clone().unwrap_or_default();
-            lines.push(Line::from(Span::styled(
-                "   a browser tab is waiting for you at",
-                theme.dim(),
-            )));
-            lines.push(Line::from(Span::styled(format!("   {url}"), theme.base())));
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "   or paste an amazon token below and press enter",
-                theme.dim(),
-            )));
-        }
+    let url = app.verification_url.clone().unwrap_or_default();
+    if let Some(reason) = &app.verification_error {
+        lines.push(Line::from(Span::styled(
+            format!("   {reason}"),
+            theme.base(),
+        )));
+        lines.push(Line::from(""));
     }
+    lines.push(Line::from(Span::styled(
+        "   a browser tab is waiting for you at",
+        theme.dim(),
+    )));
+    lines.push(Line::from(Span::styled(format!("   {url}"), theme.base())));
 
     lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "   nothing else is needed. if you already hold a token, it goes here",
+        theme.dim(),
+    )));
     let shown = if app.verification_input.chars().count() > 16 {
         format!(
             "{}\u{2026} ({} characters)",

@@ -72,8 +72,12 @@ pub async fn doctor(paths: Paths) -> Result<()> {
         match resolver.validate_credential().await {
             Ok(()) => println!("amazon    credential present and accepted"),
             Err(ApiError::CredentialRejected) => {
-                println!("amazon    credential present but REJECTED, paste a fresh token")
+                println!("amazon    credential present but REJECTED, verify again")
             }
+            Err(ApiError::Status { code, message }) if code >= 500 => println!(
+                "amazon    credential accepted, but the gateway itself failed: {code} {}",
+                secrets::redact(&message)
+            ),
             Err(error) => println!(
                 "amazon    credential present, check failed: {}",
                 secrets::redact(&error.to_string())

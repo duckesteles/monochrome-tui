@@ -238,13 +238,18 @@ impl StreamResolver {
             request = request.header(key.as_str(), value.as_str());
         }
 
-        let status = request.send().await?.status().as_u16();
-        match status {
+        let response = request.send().await?;
+        let status = response.status();
+        match status.as_u16() {
             401 => {
                 self.jwt.lock().expect("jwt").take();
                 Err(ApiError::CredentialRejected)
             }
             428 => Err(ApiError::TurnstileRequired),
+            code if code >= 500 => {
+                let body = response.text().await.unwrap_or_default();
+                Err(lookup_failure(code, &body))
+            }
             _ => Ok(()),
         }
     }
@@ -318,10 +323,7 @@ impl StreamResolver {
             return Err(ApiError::TurnstileRequired);
         }
         if !status.is_success() {
-            return Err(ApiError::Status {
-                code: status.as_u16(),
-                message: "amazon lookup failed".into(),
-            });
+            return Err(lookup_failure(status.as_u16(), &body));
         }
         serde_json::from_str(&body).map_err(|error| ApiError::Decode(error.to_string()))
     }
@@ -341,14 +343,7 @@ impl StreamResolver {
         {
             match self.resolve_deezer(isrc, quality).await {
                 Ok(handle) => return Ok(handle),
-                Err(error) => {
-                    if !matches!(
-                        last,
-                        ApiError::TurnstileRequired | ApiError::CredentialRejected
-                    ) {
-                        last = error;
-                    }
-                }
+                Err(error) => last = keep_the_more_useful(last, error),
             }
         }
 
@@ -387,10 +382,8 @@ impl StreamResolver {
             return Err(ApiError::TurnstileRequired);
         }
         if !status.is_success() {
-            return Err(ApiError::Status {
-                code: status.as_u16(),
-                message: "amazon lookup failed".into(),
-            });
+            let body = response.text().await.unwrap_or_default();
+            return Err(lookup_failure(status.as_u16(), &body));
         }
 
         let body = response.text().await?;
@@ -451,6 +444,49 @@ impl StreamResolver {
     }
 }
 
+fn keep_the_more_useful(primary: ApiError, fallback: ApiError) -> ApiError {
+    match (&primary, &fallback) {
+        (ApiError::TurnstileRequired | ApiError::CredentialRejected, _) => primary,
+        (ApiError::Network(reason), _) if reason == "no source is enabled" => fallback,
+        (ApiError::Status { .. } | ApiError::Decode(_) | ApiError::Network(_), _) => primary,
+        _ => fallback,
+    }
+}
+
+fn lookup_failure(code: u16, body: &str) -> ApiError {
+    ApiError::Status {
+        code,
+        message: match gateway_message(body) {
+            Some(message) => format!("amazon lookup failed: {message}"),
+            None => "amazon lookup failed".into(),
+        },
+    }
+}
+
+fn gateway_message(body: &str) -> Option<String> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        for key in ["detail", "message", "error"] {
+            if let Some(text) = value.get(key).and_then(serde_json::Value::as_str)
+                && !text.trim().is_empty()
+            {
+                return Some(text.trim().to_string());
+            }
+        }
+        return None;
+    }
+    let flattened: String = trimmed
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(160)
+        .collect();
+    let cleaned = flattened.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
 fn extract_track_payload(body: &str) -> ApiResult<AmazonTrack> {
     let value: serde_json::Value =
         serde_json::from_str(body).map_err(|error| ApiError::Decode(error.to_string()))?;
@@ -491,6 +527,77 @@ fn urlencode(value: &str) -> String {
 mod tests {
     use super::*;
     use monochrome_core::model::ArtistRef;
+
+    #[test]
+    fn the_gateways_own_words_survive_into_the_error() {
+        let error = lookup_failure(
+            500,
+            r#"{"detail":"[Amazon-Direct] Manifest request failed: 400"}"#,
+        );
+        assert_eq!(
+            error.to_string(),
+            "server returned 500: amazon lookup failed: [Amazon-Direct] Manifest request failed: 400"
+        );
+    }
+
+    #[test]
+    fn a_body_that_says_nothing_still_reports_the_code() {
+        assert_eq!(
+            lookup_failure(502, "").to_string(),
+            "server returned 502: amazon lookup failed"
+        );
+        assert_eq!(
+            lookup_failure(502, "   ").to_string(),
+            "server returned 502: amazon lookup failed"
+        );
+    }
+
+    #[test]
+    fn an_html_error_page_is_flattened_rather_than_dumped() {
+        let message = gateway_message("<html>\n  <body>Bad Gateway</body>\n</html>")
+            .expect("something to show");
+        assert!(!message.contains('\n'));
+        assert!(message.len() <= 160);
+        assert!(message.contains("Bad Gateway"));
+    }
+
+    #[test]
+    fn the_fallbacks_complaint_never_hides_why_the_main_source_failed() {
+        let primary = ApiError::Status {
+            code: 500,
+            message: "amazon lookup failed: upstream is down".into(),
+        };
+        let fallback = ApiError::Status {
+            code: 503,
+            message: "deezer has no copy of this track".into(),
+        };
+        let kept = keep_the_more_useful(primary, fallback);
+        assert!(kept.to_string().contains("upstream is down"), "got: {kept}");
+    }
+
+    #[test]
+    fn verification_still_outranks_everything_the_fallback_says() {
+        let kept = keep_the_more_useful(
+            ApiError::TurnstileRequired,
+            ApiError::Status {
+                code: 503,
+                message: "deezer has no copy of this track".into(),
+            },
+        );
+        assert!(matches!(kept, ApiError::TurnstileRequired));
+    }
+
+    #[test]
+    fn with_no_source_tried_the_fallback_reason_is_the_only_one_there_is() {
+        let kept = keep_the_more_useful(
+            ApiError::Network("no source is enabled".into()),
+            ApiError::Status {
+                code: 503,
+                message: "deezer has no copy of this track".into(),
+            },
+        );
+        assert!(kept.to_string().contains("deezer"));
+    }
 
     fn track() -> Track {
         Track {

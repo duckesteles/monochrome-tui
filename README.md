@@ -54,13 +54,11 @@ The first time you play something, a browser tab opens so the gateway that
 serves the audio can run its Cloudflare check. A terminal cannot pass that
 check on its own. Clear it in the browser and playback starts.
 
-The result lasts about an hour and survives restarts. If the browser check
-cannot run, the same screen accepts a token pasted by hand: open
-[monochrome.tf](https://monochrome.tf), play anything, and copy
-`amazon_turnstile_jwt` out of the site's local storage.
+The result lasts about an hour and survives restarts, so you will rarely see
+the screen twice in one sitting.
 
 If you ever get a permanent gateway credential, put it in the config and you
-will never see the prompt:
+will never see the prompt at all:
 
 ```toml
 [amazon]

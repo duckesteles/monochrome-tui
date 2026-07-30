@@ -92,10 +92,7 @@ pub fn execute(targets: &[Target], secrets: &crate::secrets::Secrets) -> Vec<(St
                 Target::File { path, .. } => std::fs::remove_file(path)
                     .map(|_| true)
                     .unwrap_or_else(|error| error.kind() == std::io::ErrorKind::NotFound),
-                Target::Secret { key, .. } => {
-                    secrets.clear(key);
-                    true
-                }
+                Target::Secret { key, .. } => secrets.clear(key),
             };
             (target.describe(), done)
         })

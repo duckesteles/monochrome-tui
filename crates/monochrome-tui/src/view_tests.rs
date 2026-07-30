@@ -417,20 +417,31 @@ fn the_verification_prompt_shows_the_local_url() {
     app.verification_url = Some("http://127.0.0.1:41234/?n=abc".into());
     let rendered = text(&draw(&app, 80, 24));
     assert!(rendered.contains("http://127.0.0.1:41234"));
-    assert!(rendered.contains("paste an amazon token"));
+    assert!(rendered.contains("nothing else is needed"));
 }
 
 #[test]
-fn a_failed_browser_check_shows_the_recovery_steps() {
+fn a_failed_browser_check_says_why_and_keeps_the_tab_address() {
     let mut app = app();
     app.focus = Focus::Verification;
+    app.verification_url = Some("http://127.0.0.1:41234/?n=abc".into());
     app.verification_error =
         Some("turnstile 110200: this gateway's Turnstile key does not accept 127.0.0.1".into());
     let rendered = text(&draw(&app, 90, 26));
     assert!(rendered.contains("110200"));
-    assert!(rendered.contains("monochrome.tf"));
-    assert!(rendered.contains("amazon_turnstile_jwt"));
-    assert!(rendered.contains("token"));
+    assert!(rendered.contains("http://127.0.0.1:41234"));
+}
+
+#[test]
+fn no_screen_ever_asks_anyone_to_open_a_browser_console() {
+    let mut app = app();
+    app.focus = Focus::Verification;
+    app.verification_url = Some("http://127.0.0.1:41234/?n=abc".into());
+    app.verification_error = Some("turnstile 110200: rejected".into());
+    let rendered = text(&draw(&app, 90, 26));
+    assert!(!rendered.contains("localStorage"));
+    assert!(!rendered.contains("amazon_turnstile_jwt"));
+    assert!(!rendered.contains("console"));
 }
 
 #[test]

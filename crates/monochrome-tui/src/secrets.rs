@@ -8,7 +8,7 @@ pub const AMAZON_JWT: &str = "amazon-jwt";
 enum Request {
     Get(String, std::sync::mpsc::Sender<Option<String>>),
     Set(String, String, std::sync::mpsc::Sender<bool>),
-    Clear(String),
+    Clear(String, std::sync::mpsc::Sender<bool>),
 }
 
 pub struct Secrets {
@@ -58,9 +58,13 @@ impl Secrets {
         self.write_fallback(key, Some(value))
     }
 
-    pub fn clear(&self, key: &str) {
-        self.dispatch(Request::Clear(key.to_string()));
+    pub fn clear(&self, key: &str) -> bool {
+        let (reply, answer) = std::sync::mpsc::channel();
+        if self.dispatch(Request::Clear(key.to_string(), reply)) {
+            let _ = answer.recv();
+        }
         let _ = self.remove_fallback(key);
+        self.get(key).is_none()
     }
 
     fn entries(&self) -> Vec<(String, String)> {
@@ -126,10 +130,16 @@ fn keyring_worker(requests: std::sync::mpsc::Receiver<Request>) {
                     .unwrap_or(false);
                 let _ = reply.send(stored);
             }
-            Request::Clear(key) => {
-                if let Ok(entry) = keyring::Entry::new(SERVICE, &key) {
-                    let _ = entry.delete_credential();
-                }
+            Request::Clear(key, reply) => {
+                let gone = match keyring::Entry::new(SERVICE, &key) {
+                    Ok(entry) => match entry.delete_credential() {
+                        Ok(()) => true,
+                        Err(keyring::Error::NoEntry) => true,
+                        Err(_) => false,
+                    },
+                    Err(_) => false,
+                };
+                let _ = reply.send(gone);
             }
         }
     }
@@ -301,6 +311,32 @@ mod runtime_tests {
         assert_eq!(store.get(&key).as_deref(), Some("plain"));
         store.clear(&key);
         assert_eq!(store.get(&key), None);
+    }
+
+    #[test]
+    fn clearing_a_secret_waits_for_it_to_be_gone_before_returning() {
+        let key = unique("cleared");
+        let scratch = Scratch::new("cleared");
+        let store = Secrets::new(scratch.file("credentials"));
+        store.set(&key, "value-to-remove").expect("set");
+
+        assert!(
+            store.clear(&key),
+            "clear should report success once the secret is actually gone"
+        );
+        assert_eq!(
+            store.get(&key),
+            None,
+            "the secret was still readable after clear returned"
+        );
+    }
+
+    #[test]
+    fn clearing_something_that_was_never_stored_still_counts_as_gone() {
+        let key = unique("never-stored");
+        let scratch = Scratch::new("never-stored");
+        let store = Secrets::new(scratch.file("credentials"));
+        assert!(store.clear(&key));
     }
 
     #[test]
