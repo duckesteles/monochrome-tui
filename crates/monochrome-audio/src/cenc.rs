@@ -420,6 +420,50 @@ fn parse_senc(body: &[u8]) -> Vec<[u8; 16]> {
 
 #[cfg(test)]
 mod tests {
+
+    fn noise(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn random_bytes_are_read_to_the_end_without_panicking() {
+        for seed in 0..200u64 {
+            let bytes = noise(seed, 1 + (seed as usize * 7) % 4096);
+            let mut reader = FlacFromCenc::new(std::io::Cursor::new(bytes), key());
+            let mut sink = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut reader, &mut sink);
+        }
+    }
+
+    #[test]
+    fn a_real_stream_cut_at_every_length_never_panics() {
+        let stream = stream_with(&[vec![1u8; 64], vec![2u8; 48]], &[[7u8; 8], [9u8; 8]]);
+        for cut in 0..stream.len() {
+            let mut reader = FlacFromCenc::new(std::io::Cursor::new(stream[..cut].to_vec()), key());
+            let mut sink = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut reader, &mut sink);
+        }
+    }
+
+    #[test]
+    fn a_real_stream_with_one_byte_flipped_never_panics() {
+        let stream = stream_with(&[vec![1u8; 64], vec![2u8; 48]], &[[7u8; 8], [9u8; 8]]);
+        for at in (0..stream.len()).step_by(7) {
+            let mut damaged = stream.clone();
+            damaged[at] ^= 0xff;
+            let mut reader = FlacFromCenc::new(std::io::Cursor::new(damaged), key());
+            let mut sink = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut reader, &mut sink);
+        }
+    }
     use super::*;
 
     fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {

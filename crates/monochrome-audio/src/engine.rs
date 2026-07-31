@@ -16,6 +16,7 @@ use symphonia::core::units::Time;
 
 const RING_SECONDS: f32 = 4.0;
 const IDLE_SLEEP: Duration = Duration::from_millis(5);
+const RESTING_SLEEP: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone)]
 pub struct PlayRequest {
@@ -585,7 +586,10 @@ fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) 
         }
 
         if idle {
-            std::thread::sleep(IDLE_SLEEP);
+            std::thread::sleep(match playback.is_some() {
+                true => IDLE_SLEEP,
+                false => RESTING_SLEEP,
+            });
         }
     }
 }

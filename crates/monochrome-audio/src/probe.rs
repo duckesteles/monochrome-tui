@@ -132,6 +132,40 @@ pub fn ascii_preview(bytes: &[u8], limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    fn noise(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn describing_random_bytes_never_panics() {
+        for seed in 0..300u64 {
+            let bytes = noise(seed, (seed as usize * 13) % 2048);
+            let _ = describe(&bytes);
+            let _ = top_level_boxes(&bytes);
+            let _ = encryption_markers(&bytes);
+            let _ = hex_preview(&bytes, 32);
+            let _ = ascii_preview(&bytes, 32);
+        }
+    }
+
+    #[test]
+    fn a_box_header_claiming_an_enormous_size_is_not_followed() {
+        let mut data = u32::MAX.to_be_bytes().to_vec();
+        data.extend_from_slice(b"mdat");
+        data.extend_from_slice(&[0u8; 8]);
+        let boxes = top_level_boxes(&data);
+        assert_eq!(boxes.len(), 1);
+        assert!(boxes[0].truncated);
+    }
     use super::*;
 
     fn mp4_box(kind: &[u8; 4], payload: usize) -> Vec<u8> {

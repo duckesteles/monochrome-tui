@@ -12,6 +12,8 @@ updates:
           - patch
     commit-message:
       prefix: "build(deps)"
+    labels:
+      - dependencies
 
   - package-ecosystem: github-actions
     directory: /
@@ -19,3 +21,6 @@ updates:
       interval: monthly
     commit-message:
       prefix: "ci"
+    labels:
+      - dependencies
+      - ci
