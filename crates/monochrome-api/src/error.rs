@@ -7,6 +7,7 @@ pub enum ApiError {
     Decode(String),
     Unauthorized,
     NoInstances,
+    NoSourceEnabled,
     AllInstancesFailed(Vec<String>),
     TurnstileRequired,
     CredentialRejected,
@@ -24,6 +25,7 @@ impl fmt::Display for ApiError {
             ApiError::Decode(detail) => write!(f, "unexpected response: {detail}"),
             ApiError::Unauthorized => write!(f, "session expired, sign in again"),
             ApiError::NoInstances => write!(f, "no catalog instances configured"),
+            ApiError::NoSourceEnabled => write!(f, "every playback source is switched off"),
             ApiError::AllInstancesFailed(reasons) => {
                 write!(f, "every catalog instance failed")?;
                 if let Some(first) = reasons.first() {

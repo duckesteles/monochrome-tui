@@ -155,17 +155,18 @@ pub async fn probe(paths: Paths, query: String) -> Result<()> {
     }
 
     if resolver.has_static_amazon_credential() {
-        match resolver.amazon_lookup(&track, config.quality()).await {
+        let looked_up = resolver.amazon_lookup(&track, config.quality()).await;
+        match &looked_up {
             Ok(payload) => {
                 println!("lookup    the gateway answered with:");
-                for line in summarise_payload(&payload, "") {
+                for line in summarise_payload(payload, "") {
                     println!("            {line}");
                 }
             }
             Err(error) => println!("lookup    FAILED: {}", secrets::redact(&error.to_string())),
         }
 
-        if let Ok(payload) = resolver.amazon_lookup(&track, config.quality()).await
+        if let Ok(payload) = &looked_up
             && let Some(direct) = payload
                 .get("stream_url")
                 .and_then(serde_json::Value::as_str)

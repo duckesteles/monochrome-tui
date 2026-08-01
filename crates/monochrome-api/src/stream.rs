@@ -530,19 +530,23 @@ impl StreamResolver {
     }
 
     pub async fn resolve(&self, track: &Track, quality: Quality) -> ApiResult<StreamHandle> {
-        let mut last = ApiError::Network("no source is enabled".into());
+        let mut last: Option<ApiError> = None;
+        let remember = |seen: Option<ApiError>, error: ApiError| match seen {
+            Some(previous) => Some(keep_the_more_useful(previous, error)),
+            None => Some(error),
+        };
 
         if self.config.playback_enabled {
             match self.resolve_monochrome(track).await {
                 Ok(handle) => return Ok(handle),
-                Err(error) => last = error,
+                Err(error) => last = remember(last, error),
             }
         }
 
         if self.config.amazon_enabled && self.has_static_amazon_credential() {
             match self.resolve_amazon(track, quality).await {
                 Ok(handle) => return Ok(handle),
-                Err(error) => last = keep_the_more_useful(last, error),
+                Err(error) => last = remember(last, error),
             }
         }
 
@@ -551,11 +555,11 @@ impl StreamResolver {
         {
             match self.resolve_deezer(isrc, quality).await {
                 Ok(handle) => return Ok(handle),
-                Err(error) => last = keep_the_more_useful(last, error),
+                Err(error) => last = remember(last, error),
             }
         }
 
-        Err(last)
+        Err(last.unwrap_or(ApiError::NoSourceEnabled))
     }
 
     async fn resolve_amazon(&self, track: &Track, quality: Quality) -> ApiResult<StreamHandle> {
@@ -653,11 +657,9 @@ impl StreamResolver {
 }
 
 fn keep_the_more_useful(primary: ApiError, fallback: ApiError) -> ApiError {
-    match (&primary, &fallback) {
-        (ApiError::TurnstileRequired | ApiError::CredentialRejected, _) => primary,
-        (ApiError::Network(reason), _) if reason == "no source is enabled" => fallback,
-        (ApiError::Status { .. } | ApiError::Decode(_) | ApiError::Network(_), _) => primary,
-        _ => fallback,
+    match primary {
+        ApiError::NotFound => fallback,
+        primary => primary,
     }
 }
 
@@ -865,15 +867,28 @@ mod tests {
     }
 
     #[test]
-    fn with_no_source_tried_the_fallback_reason_is_the_only_one_there_is() {
+    fn a_source_that_simply_had_nothing_defers_to_the_next_one() {
         let kept = keep_the_more_useful(
-            ApiError::Network("no source is enabled".into()),
+            ApiError::NotFound,
             ApiError::Status {
                 code: 503,
                 message: "deezer has no copy of this track".into(),
             },
         );
-        assert!(kept.to_string().contains("deezer"));
+        assert!(kept.to_string().contains("deezer"), "got: {kept}");
+    }
+
+    #[tokio::test]
+    async fn switching_every_source_off_says_so_plainly() {
+        let mut config = StreamConfig::with_defaults();
+        config.playback_enabled = false;
+        config.amazon_enabled = false;
+        config.deezer_enabled = false;
+        let error = resolver(config)
+            .resolve(&track(), Quality::Lossless)
+            .await
+            .expect_err("nothing can play");
+        assert!(matches!(error, ApiError::NoSourceEnabled), "got: {error}");
     }
 
     fn track() -> Track {
