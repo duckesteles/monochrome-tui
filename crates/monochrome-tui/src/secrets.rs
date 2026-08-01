@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 const SERVICE: &str = "monochrome-tui";
 pub const SESSION_TOKEN: &str = "session-token";
-pub const AMAZON_JWT: &str = "amazon-jwt";
+pub const PLAYBACK_SESSION: &str = "playback-session";
+pub const LEGACY_PLAYBACK_SESSION: &str = "amazon-jwt";
 
 enum Request {
     Get(String, std::sync::mpsc::Sender<Option<String>>),

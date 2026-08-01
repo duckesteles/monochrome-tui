@@ -1,5 +1,5 @@
 use crate::config::{Config, Paths};
-use crate::secrets::{self, AMAZON_JWT, SESSION_TOKEN, Secrets};
+use crate::secrets::{self, PLAYBACK_SESSION, SESSION_TOKEN, Secrets};
 use anyhow::{Context, Result};
 use monochrome_api::error::ApiError;
 use monochrome_api::{AuthClient, Catalog, StreamResolver};
@@ -74,18 +74,29 @@ pub async fn doctor(paths: Paths) -> Result<()> {
     }
 
     let resolver = StreamResolver::new(config.stream_config())?;
-    if let Some(jwt) = secrets.get(AMAZON_JWT) {
+    if let Some(jwt) = secrets.get(PLAYBACK_SESSION) {
         resolver.cache_jwt(jwt);
     }
-    let seen = resolver.gateway_client_ip().await;
-    let issued_for = secrets
-        .get(AMAZON_JWT)
-        .and_then(|token| monochrome_api::jwt::inspect(&token))
-        .map(|claims| claims.addresses)
-        .unwrap_or_default();
-    println!("gateway   {}", describe_address(seen, &issued_for));
+    match resolver.playback_health().await {
+        Ok(()) => println!("playback  the service is answering"),
+        Err(error) => println!("playback  FAILED: {}", secrets::redact(&error.to_string())),
+    }
+    println!(
+        "browser   {}",
+        match resolver.has_session() {
+            true => "checked, a playback session is held",
+            false => "not checked yet, a tab will open when you play something",
+        }
+    );
 
-    if resolver.has_amazon_credential() {
+    if resolver.has_static_amazon_credential() {
+        let seen = resolver.gateway_client_ip().await;
+        let issued_for = secrets
+            .get(PLAYBACK_SESSION)
+            .and_then(|token| monochrome_api::jwt::inspect(&token))
+            .map(|claims| claims.addresses)
+            .unwrap_or_default();
+        println!("gateway   {}", describe_address(seen, &issued_for));
         match resolver.validate_credential().await {
             Ok(()) => println!("amazon    credential present and accepted"),
             Err(ApiError::CredentialRejected) => {
@@ -100,8 +111,6 @@ pub async fn doctor(paths: Paths) -> Result<()> {
                 secrets::redact(&error.to_string())
             ),
         }
-    } else {
-        println!("amazon    no credential, a browser check will be needed");
     }
     println!(
         "deezer    {}",
@@ -120,7 +129,7 @@ pub async fn probe(paths: Paths, query: String) -> Result<()> {
     let secrets = Secrets::new(paths.log_dir.join("credentials"));
     let catalog = Catalog::new(config.instances())?;
     let resolver = StreamResolver::new(config.stream_config())?;
-    if let Some(jwt) = secrets.get(AMAZON_JWT) {
+    if let Some(jwt) = secrets.get(PLAYBACK_SESSION) {
         resolver.cache_jwt(jwt);
     }
 
@@ -140,83 +149,90 @@ pub async fn probe(paths: Paths, query: String) -> Result<()> {
 
     println!("credential {}", resolver.credential_kind());
 
-    match resolver.amazon_lookup(&track, config.quality()).await {
-        Ok(payload) => {
-            println!("lookup    the gateway answered with:");
-            for line in summarise_payload(&payload, "") {
-                println!("            {line}");
-            }
-        }
-        Err(error) => println!("lookup    FAILED: {}", secrets::redact(&error.to_string())),
+    match resolver.playback_health().await {
+        Ok(()) => println!("playback  the service is answering"),
+        Err(error) => println!("playback  FAILED: {}", secrets::redact(&error.to_string())),
     }
 
-    if let Ok(payload) = resolver.amazon_lookup(&track, config.quality()).await
-        && let Some(direct) = payload
-            .get("stream_url")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-    {
-        println!("direct    fetching the cdn url the web client uses");
-        let sample = tokio::task::spawn_blocking(move || {
-            use monochrome_audio::source::ByteRange;
-            let backend = monochrome_audio::source::HttpRange::open(&direct, &[])?;
-            let content_type = backend.content_type();
-            let length = backend.total_len();
-            let mut reader = backend.open_at(0)?;
-            let mut buffer = vec![0u8; 4096];
-            let mut filled = 0;
-            while filled < buffer.len() {
-                match std::io::Read::read(&mut reader, &mut buffer[filled..]) {
-                    Ok(0) => break,
-                    Ok(read) => filled += read,
-                    Err(error) => return Err(error),
+    if resolver.has_static_amazon_credential() {
+        match resolver.amazon_lookup(&track, config.quality()).await {
+            Ok(payload) => {
+                println!("lookup    the gateway answered with:");
+                for line in summarise_payload(&payload, "") {
+                    println!("            {line}");
                 }
             }
-            buffer.truncate(filled);
-            Ok::<_, std::io::Error>((content_type, length, buffer))
-        })
-        .await?;
+            Err(error) => println!("lookup    FAILED: {}", secrets::redact(&error.to_string())),
+        }
 
-        match sample {
-            Err(error) => println!("direct    FAILED: {}", secrets::redact(&error.to_string())),
-            Ok((content_type, length, bytes)) => {
-                println!(
-                    "  type    {}",
-                    content_type.as_deref().unwrap_or("not reported")
-                );
-                println!(
-                    "  length  {}",
-                    length
-                        .map(|value| format!("{value} bytes"))
-                        .unwrap_or_else(|| "not reported".into())
-                );
-                println!("  read    {} bytes", bytes.len());
-                println!(
-                    "  hex     {}",
-                    monochrome_audio::probe::hex_preview(&bytes, 24)
-                );
-                println!(
-                    "  ascii   {}",
-                    monochrome_audio::probe::ascii_preview(&bytes, 24)
-                );
-                let boxes = monochrome_audio::probe::top_level_boxes(&bytes);
-                if !boxes.is_empty() {
-                    let listed: Vec<String> = boxes
-                        .iter()
-                        .map(|entry| format!("{}({})", entry.kind, entry.size))
-                        .collect();
-                    println!("  boxes   {}", listed.join(" "));
-                }
-                let markers = monochrome_audio::probe::encryption_markers(&bytes);
-                println!(
-                    "  crypto  {}",
-                    if markers.is_empty() {
-                        "no encryption boxes in the first 4 kB".to_string()
-                    } else {
-                        markers.join(" ")
+        if let Ok(payload) = resolver.amazon_lookup(&track, config.quality()).await
+            && let Some(direct) = payload
+                .get("stream_url")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        {
+            println!("direct    fetching the cdn url the web client uses");
+            let sample = tokio::task::spawn_blocking(move || {
+                use monochrome_audio::source::ByteRange;
+                let backend = monochrome_audio::source::HttpRange::open(&direct, &[])?;
+                let content_type = backend.content_type();
+                let length = backend.total_len();
+                let mut reader = backend.open_at(0)?;
+                let mut buffer = vec![0u8; 4096];
+                let mut filled = 0;
+                while filled < buffer.len() {
+                    match std::io::Read::read(&mut reader, &mut buffer[filled..]) {
+                        Ok(0) => break,
+                        Ok(read) => filled += read,
+                        Err(error) => return Err(error),
                     }
-                );
-                println!("  verdict {}", monochrome_audio::probe::describe(&bytes));
+                }
+                buffer.truncate(filled);
+                Ok::<_, std::io::Error>((content_type, length, buffer))
+            })
+            .await?;
+
+            match sample {
+                Err(error) => println!("direct    FAILED: {}", secrets::redact(&error.to_string())),
+                Ok((content_type, length, bytes)) => {
+                    println!(
+                        "  type    {}",
+                        content_type.as_deref().unwrap_or("not reported")
+                    );
+                    println!(
+                        "  length  {}",
+                        length
+                            .map(|value| format!("{value} bytes"))
+                            .unwrap_or_else(|| "not reported".into())
+                    );
+                    println!("  read    {} bytes", bytes.len());
+                    println!(
+                        "  hex     {}",
+                        monochrome_audio::probe::hex_preview(&bytes, 24)
+                    );
+                    println!(
+                        "  ascii   {}",
+                        monochrome_audio::probe::ascii_preview(&bytes, 24)
+                    );
+                    let boxes = monochrome_audio::probe::top_level_boxes(&bytes);
+                    if !boxes.is_empty() {
+                        let listed: Vec<String> = boxes
+                            .iter()
+                            .map(|entry| format!("{}({})", entry.kind, entry.size))
+                            .collect();
+                        println!("  boxes   {}", listed.join(" "));
+                    }
+                    let markers = monochrome_audio::probe::encryption_markers(&bytes);
+                    println!(
+                        "  crypto  {}",
+                        if markers.is_empty() {
+                            "no encryption boxes in the first 4 kB".to_string()
+                        } else {
+                            markers.join(" ")
+                        }
+                    );
+                    println!("  verdict {}", monochrome_audio::probe::describe(&bytes));
+                }
             }
         }
     }
@@ -363,7 +379,7 @@ pub async fn play_once(paths: Paths, query: String) -> Result<()> {
     let secrets = Secrets::new(paths.log_dir.join("credentials"));
     let catalog = Catalog::new(config.instances())?;
     let resolver = StreamResolver::new(config.stream_config())?;
-    if let Some(jwt) = secrets.get(AMAZON_JWT) {
+    if let Some(jwt) = secrets.get(PLAYBACK_SESSION) {
         resolver.cache_jwt(jwt);
     }
 

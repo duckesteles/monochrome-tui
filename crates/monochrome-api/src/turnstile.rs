@@ -4,6 +4,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 pub const DEFAULT_SITE_KEY: &str = "0x4AAAAAADgxqF6QVMm0GLHH";
+pub const DEFAULT_ACTION: &str = "auth";
 const SOLVE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 
@@ -11,10 +12,16 @@ pub struct Bridge {
     listener: TcpListener,
     nonce: String,
     site_key: String,
+    action: String,
 }
 
 impl Bridge {
-    pub async fn bind(site_key: &str) -> ApiResult<Self> {
+    pub async fn bind(site_key: &str, action: &str) -> ApiResult<Self> {
+        if !is_safe_site_key(action) {
+            return Err(ApiError::Network(
+                "the turnstile action is not a plain word".into(),
+            ));
+        }
         if !is_safe_site_key(site_key) {
             return Err(ApiError::Network(
                 "the configured turnstile site key is not a plain key".into(),
@@ -27,6 +34,7 @@ impl Bridge {
             listener,
             nonce: nonce(),
             site_key: site_key.to_string(),
+            action: action.to_string(),
         })
     }
 
@@ -76,7 +84,7 @@ impl Bridge {
 
             match path {
                 "/" => {
-                    let page = challenge_page(&self.site_key, &self.nonce);
+                    let page = challenge_page(&self.site_key, &self.nonce, &self.action);
                     respond(&mut stream, "200 OK", "text/html; charset=utf-8", &page).await;
                 }
                 "/token" => {
@@ -233,7 +241,7 @@ pub fn describe_turnstile_error(code: &str) -> String {
     format!("turnstile {code}: {explanation}")
 }
 
-fn challenge_page(site_key: &str, nonce: &str) -> String {
+fn challenge_page(site_key: &str, nonce: &str, action: &str) -> String {
     format!(
         r#"<!doctype html>
 <meta charset="utf-8">
@@ -254,6 +262,7 @@ p {{ color: #666; }}
 function start() {{
   turnstile.render('#widget', {{
     sitekey: '{site_key}',
+    action: '{action}',
     callback: function (token) {{
       fetch('/token?n={nonce}&t=' + encodeURIComponent(token))
         .then(function () {{
@@ -355,7 +364,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_reported_challenge_error_reaches_the_caller() {
-        let bridge = Bridge::bind(DEFAULT_SITE_KEY).await.expect("bridge");
+        let bridge = Bridge::bind(DEFAULT_SITE_KEY, DEFAULT_ACTION)
+            .await
+            .expect("bridge");
         let port = bridge.listener.local_addr().unwrap().port();
         let url = bridge.url();
         let nonce = url.rsplit("n=").next().unwrap().to_string();
@@ -378,14 +389,16 @@ mod tests {
 
     #[test]
     fn the_challenge_page_carries_the_site_key_and_nonce() {
-        let page = challenge_page("0xSITEKEY", "abcd");
+        let page = challenge_page("0xSITEKEY", "abcd", "auth");
         assert!(page.contains("0xSITEKEY"));
         assert!(page.contains("/token?n=abcd"));
     }
 
     #[tokio::test]
     async fn the_bridge_binds_to_loopback_only() {
-        let bridge = Bridge::bind(DEFAULT_SITE_KEY).await.expect("bridge");
+        let bridge = Bridge::bind(DEFAULT_SITE_KEY, DEFAULT_ACTION)
+            .await
+            .expect("bridge");
         let address = bridge.listener.local_addr().expect("addr");
         assert!(address.ip().is_loopback());
         assert!(bridge.url().starts_with("http://localhost:"));
@@ -393,7 +406,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_wrong_nonce_is_refused() {
-        let bridge = Bridge::bind(DEFAULT_SITE_KEY).await.expect("bridge");
+        let bridge = Bridge::bind(DEFAULT_SITE_KEY, DEFAULT_ACTION)
+            .await
+            .expect("bridge");
         let port = bridge.listener.local_addr().unwrap().port();
         let task = tokio::spawn(bridge.wait_for_token());
 
@@ -412,7 +427,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_valid_callback_yields_the_token() {
-        let bridge = Bridge::bind(DEFAULT_SITE_KEY).await.expect("bridge");
+        let bridge = Bridge::bind(DEFAULT_SITE_KEY, DEFAULT_ACTION)
+            .await
+            .expect("bridge");
         let port = bridge.listener.local_addr().unwrap().port();
         let url = bridge.url();
         let nonce = url.rsplit("n=").next().unwrap().to_string();

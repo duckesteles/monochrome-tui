@@ -141,7 +141,6 @@ pub enum Effect {
     PushSync,
     SignIn { email: String, password: String },
     SignOut,
-    UseToken(String),
     OpenBrowser,
     Quit,
 }
@@ -199,7 +198,6 @@ pub struct App {
     pub roomy_rows: bool,
     lengths: HashMap<u64, u32>,
     asked_about: HashSet<u64>,
-    pub verification_input: String,
     pub verification_error: Option<String>,
     pub syncing: bool,
     pub quit: bool,
@@ -232,7 +230,6 @@ impl App {
             lengths: HashMap::new(),
             asked_about: HashSet::new(),
             verification_url: None,
-            verification_input: String::new(),
             verification_error: None,
             syncing: false,
             quit: false,
@@ -723,24 +720,6 @@ impl App {
             (self.help_scroll as i32 + delta as i32).clamp(0, furthest as i32) as u16;
     }
 
-    pub fn submit_verification(&mut self) -> Vec<Effect> {
-        let pasted = clean_pasted_token(&self.verification_input);
-        if pasted.is_empty() {
-            return Vec::new();
-        }
-        if matches!(pasted.as_str(), "null" | "undefined") {
-            self.verification_input.clear();
-            self.verification_error = Some(
-                "the web app has no token yet, so the console printed nothing. play something on \
-                 monochrome.tf first, then copy it again."
-                    .into(),
-            );
-            return Vec::new();
-        }
-        self.verification_input.clear();
-        vec![Effect::UseToken(pasted)]
-    }
-
     pub fn submit_search(&mut self) -> Vec<Effect> {
         let query = self.search_input.trim().to_string();
         self.focus = Focus::Browsing;
@@ -832,7 +811,6 @@ impl App {
             }
             Message::Verified => {
                 self.verification_url = None;
-                self.verification_input.clear();
                 self.verification_error = None;
                 self.focus = Focus::Browsing;
                 self.status = Some("verified".into());
@@ -892,13 +870,6 @@ impl App {
         }
         self.push(screen);
     }
-}
-
-pub fn clean_pasted_token(raw: &str) -> String {
-    raw.trim()
-        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
-        .trim()
-        .to_string()
 }
 
 fn describe(added: bool, title: &str) -> String {

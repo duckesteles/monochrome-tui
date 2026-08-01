@@ -31,9 +31,12 @@ impl fmt::Display for ApiError {
                 }
                 Ok(())
             }
-            ApiError::TurnstileRequired => write!(f, "amazon gateway needs verification"),
+            ApiError::TurnstileRequired => write!(f, "a browser check is needed before playing"),
             ApiError::CredentialRejected => {
-                write!(f, "the amazon token was rejected, it is wrong or expired")
+                write!(
+                    f,
+                    "the stored credential was refused, it is wrong or expired"
+                )
             }
             ApiError::NotFound => write!(f, "not found"),
         }

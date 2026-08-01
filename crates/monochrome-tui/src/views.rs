@@ -387,7 +387,7 @@ fn verification<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
     let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "   the amazon gateway needs a browser check",
+            "   monochrome playback needs a quick browser check",
             theme.strong(),
         )),
         Line::from(""),
@@ -408,29 +408,7 @@ fn verification<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
     lines.push(Line::from(Span::styled(format!("   {url}"), theme.base())));
 
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "   nothing else is needed. if you already hold a token, it goes here",
-        theme.dim(),
-    )));
-    let shown = if app.verification_input.chars().count() > 16 {
-        format!(
-            "{}\u{2026} ({} characters)",
-            app.verification_input.chars().take(16).collect::<String>(),
-            app.verification_input.chars().count()
-        )
-    } else {
-        app.verification_input.clone()
-    };
-    lines.push(Line::from(vec![
-        Span::styled("   token  ", theme.dim()),
-        Span::styled(shown, theme.base()),
-        Span::styled("_", theme.strong()),
-    ]));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "   esc goes back, the token is stored in your keyring",
-        theme.dim(),
-    )));
+    lines.push(Line::from(Span::styled("   esc goes back", theme.dim())));
 
     Paragraph::new(lines)
 }

@@ -262,19 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn a_token_can_be_pasted_into_the_verification_prompt() {
-        assert_eq!(
-            resolve(key(KeyCode::Char('e')), Focus::Verification),
-            Action::Insert('e')
-        );
-        assert_eq!(
-            resolve(key(KeyCode::Char('.')), Focus::Verification),
-            Action::Insert('.')
-        );
-        assert_eq!(
-            resolve(key(KeyCode::Backspace), Focus::Verification),
-            Action::Backspace
-        );
+    fn the_verification_screen_only_takes_enter_and_escape() {
         assert_eq!(
             resolve(key(KeyCode::Enter), Focus::Verification),
             Action::Submit

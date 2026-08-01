@@ -417,7 +417,7 @@ fn the_verification_prompt_shows_the_local_url() {
     app.verification_url = Some("http://127.0.0.1:41234/?n=abc".into());
     let rendered = text(&draw(&app, 80, 24));
     assert!(rendered.contains("http://127.0.0.1:41234"));
-    assert!(rendered.contains("nothing else is needed"));
+    assert!(rendered.contains("browser tab"));
 }
 
 #[test]
@@ -445,13 +445,14 @@ fn no_screen_ever_asks_anyone_to_open_a_browser_console() {
 }
 
 #[test]
-fn a_pasted_token_is_never_shown_in_full() {
+fn the_verification_screen_never_asks_for_a_token() {
     let mut app = app();
     app.focus = Focus::Verification;
-    app.verification_input = "example-token-value-of-some-length".into();
+    app.verification_url = Some("http://127.0.0.1:41234/?n=abc".into());
     let rendered = text(&draw(&app, 90, 26));
-    assert!(!rendered.contains("secret-payload"));
-    assert!(rendered.contains("characters"));
+    assert!(!rendered.contains("token"));
+    assert!(!rendered.contains("paste"));
+    assert!(rendered.contains("http://127.0.0.1:41234"));
 }
 
 #[test]

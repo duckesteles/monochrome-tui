@@ -8,11 +8,13 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_AMAZON_URL: &str = "https://amz.geeked.wtf";
 const WEB_ORIGIN: &str = "https://monochrome.tf";
 pub const DEFAULT_DEEZER_URL: &str = "https://dzr.tabs-vs-spaces.wtf";
+pub const DEFAULT_PLAYBACK_URL: &str = "https://track-api.monochrome.tf";
 const JWT_LIFETIME: Duration = Duration::from_secs(55 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
+    Monochrome,
     Amazon,
     Deezer,
 }
@@ -20,6 +22,7 @@ pub enum Source {
 impl Source {
     pub fn label(self) -> &'static str {
         match self {
+            Source::Monochrome => "monochrome",
             Source::Amazon => "amazon",
             Source::Deezer => "deezer",
         }
@@ -37,11 +40,14 @@ pub struct StreamHandle {
 
 #[derive(Debug, Clone, Default)]
 pub struct StreamConfig {
+    pub playback_enabled: bool,
+    pub playback_url: String,
     pub amazon_enabled: bool,
     pub amazon_url: String,
     pub amazon_bypass_token: Option<String>,
     pub amazon_api_key: Option<String>,
     pub turnstile_site_key: String,
+    pub turnstile_action: String,
     pub deezer_enabled: bool,
     pub deezer_url: String,
 }
@@ -49,11 +55,14 @@ pub struct StreamConfig {
 impl StreamConfig {
     pub fn with_defaults() -> Self {
         Self {
+            playback_enabled: true,
+            playback_url: DEFAULT_PLAYBACK_URL.into(),
             amazon_enabled: true,
             amazon_url: DEFAULT_AMAZON_URL.into(),
             amazon_bypass_token: None,
             amazon_api_key: None,
             turnstile_site_key: turnstile::DEFAULT_SITE_KEY.into(),
+            turnstile_action: turnstile::DEFAULT_ACTION.into(),
             deezer_enabled: true,
             deezer_url: DEFAULT_DEEZER_URL.into(),
         }
@@ -77,17 +86,27 @@ struct AmazonTrack {
 #[derive(Debug, Deserialize)]
 struct TurnstileExchange {
     access_token: String,
+    #[serde(default)]
+    expires_in: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaybackAnswer {
+    url: String,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct CachedJwt {
     token: String,
     obtained: Instant,
+    lifetime: Duration,
 }
 
 impl CachedJwt {
     fn is_valid(&self) -> bool {
-        self.obtained.elapsed() < JWT_LIFETIME
+        self.obtained.elapsed() < self.lifetime
     }
 }
 
@@ -119,10 +138,23 @@ impl StreamResolver {
     }
 
     pub fn cache_jwt(&self, token: String) {
+        self.cache_session(token, JWT_LIFETIME);
+    }
+
+    fn cache_session(&self, token: String, lifetime: Duration) {
         *self.jwt.lock().expect("jwt") = Some(CachedJwt {
             token,
             obtained: Instant::now(),
+            lifetime,
         });
+    }
+
+    pub fn has_session(&self) -> bool {
+        self.jwt
+            .lock()
+            .expect("jwt")
+            .as_ref()
+            .is_some_and(CachedJwt::is_valid)
     }
 
     pub fn cached_jwt(&self) -> Option<String> {
@@ -134,7 +166,7 @@ impl StreamResolver {
             .map(|jwt| jwt.token.clone())
     }
 
-    pub fn has_amazon_credential(&self) -> bool {
+    pub fn has_static_amazon_credential(&self) -> bool {
         self.config
             .amazon_bypass_token
             .as_ref()
@@ -144,12 +176,10 @@ impl StreamResolver {
                 .amazon_api_key
                 .as_ref()
                 .is_some_and(|k| !k.is_empty())
-            || self
-                .jwt
-                .lock()
-                .expect("jwt")
-                .as_ref()
-                .is_some_and(CachedJwt::is_valid)
+    }
+
+    pub fn has_amazon_credential(&self) -> bool {
+        self.has_static_amazon_credential() || self.has_session()
     }
 
     fn amazon_credential(&self) -> Option<Credential> {
@@ -178,15 +208,19 @@ impl StreamResolver {
     }
 
     pub async fn start_verification(&self) -> ApiResult<Bridge> {
-        Bridge::bind(&self.config.turnstile_site_key).await
+        Bridge::bind(
+            &self.config.turnstile_site_key,
+            &self.config.turnstile_action,
+        )
+        .await
     }
 
     pub async fn finish_verification(&self, challenge_token: &str) -> ApiResult<()> {
-        let base = self.config.amazon_url.trim_end_matches('/');
+        let base = self.config.playback_url.trim_end_matches('/');
         let response = self
             .client
-            .post(format!("{base}/api/auth/turnstile"))
-            .json(&serde_json::json!({ "cf_turnstile_response": challenge_token }))
+            .post(format!("{base}/auth/turnstile"))
+            .json(&serde_json::json!({ "turnstile_token": challenge_token }))
             .send()
             .await?;
 
@@ -195,13 +229,103 @@ impl StreamResolver {
         if !status.is_success() {
             return Err(ApiError::Status {
                 code: status.as_u16(),
-                message: "verification was rejected".into(),
+                message: match gateway_message(&body) {
+                    Some(message) => format!("verification was rejected: {message}"),
+                    None => "verification was rejected".into(),
+                },
             });
         }
         let parsed: TurnstileExchange =
             serde_json::from_str(&body).map_err(|error| ApiError::Decode(error.to_string()))?;
-        self.cache_jwt(parsed.access_token);
+        let lifetime = parsed
+            .expires_in
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs)
+            .unwrap_or(JWT_LIFETIME);
+        self.cache_session(parsed.access_token, lifetime);
         Ok(())
+    }
+
+    async fn resolve_monochrome(&self, track: &Track) -> ApiResult<StreamHandle> {
+        let Some(session) = self.cached_jwt() else {
+            return Err(ApiError::TurnstileRequired);
+        };
+        let base = self.config.playback_url.trim_end_matches('/');
+
+        let mut body = serde_json::json!({
+            "song_name": track.title,
+            "artist": track.artist_name(),
+        });
+        if let Some(isrc) = track.isrc.as_deref().filter(|isrc| !isrc.is_empty()) {
+            body["isrc"] = serde_json::Value::from(isrc);
+        }
+        if track.duration > 0 {
+            body["duration"] = serde_json::Value::from(track.duration);
+        }
+
+        let response = self
+            .client
+            .post(format!("{base}/playback"))
+            .bearer_auth(&session)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        match status.as_u16() {
+            401 | 403 => {
+                self.jwt.lock().expect("jwt").take();
+                return Err(ApiError::TurnstileRequired);
+            }
+            429 => {
+                return Err(ApiError::Status {
+                    code: 429,
+                    message: "the playback service is rate limiting this client".into(),
+                });
+            }
+            code if !status.is_success() => {
+                return Err(ApiError::Status {
+                    code,
+                    message: match gateway_message(&text) {
+                        Some(message) => format!("playback lookup failed: {message}"),
+                        None => "playback lookup failed".into(),
+                    },
+                });
+            }
+            _ => {}
+        }
+
+        let answer: PlaybackAnswer =
+            serde_json::from_str(&text).map_err(|error| ApiError::Decode(error.to_string()))?;
+        if !answer.url.starts_with("https://") {
+            return Err(ApiError::Decode(
+                "the playback service returned no usable address".into(),
+            ));
+        }
+        let _ = answer.title;
+
+        Ok(StreamHandle {
+            url: answer.url,
+            headers: Vec::new(),
+            source: Source::Monochrome,
+            quality: Some("LOSSLESS".into()),
+            decryption_key: None,
+        })
+    }
+
+    pub async fn playback_health(&self) -> ApiResult<()> {
+        let base = self.config.playback_url.trim_end_matches('/');
+        let response = self.client.get(format!("{base}/health")).send().await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let body = response.text().await.unwrap_or_default();
+        Err(ApiError::Status {
+            code: status.as_u16(),
+            message: gateway_message(&body).unwrap_or_else(|| "the service is unwell".into()),
+        })
     }
 
     pub async fn gateway_client_ip(&self) -> Option<String> {
@@ -278,7 +402,7 @@ impl StreamResolver {
             .as_ref()
             .is_some_and(CachedJwt::is_valid)
         {
-            return "stored turnstile token";
+            return "playback session from the browser check";
         }
         "none"
     }
@@ -331,10 +455,17 @@ impl StreamResolver {
     pub async fn resolve(&self, track: &Track, quality: Quality) -> ApiResult<StreamHandle> {
         let mut last = ApiError::Network("no source is enabled".into());
 
-        if self.config.amazon_enabled {
-            match self.resolve_amazon(track, quality).await {
+        if self.config.playback_enabled {
+            match self.resolve_monochrome(track).await {
                 Ok(handle) => return Ok(handle),
                 Err(error) => last = error,
+            }
+        }
+
+        if self.config.amazon_enabled && self.has_static_amazon_credential() {
+            match self.resolve_amazon(track, quality).await {
+                Ok(handle) => return Ok(handle),
+                Err(error) => last = keep_the_more_useful(last, error),
             }
         }
 
@@ -693,6 +824,7 @@ mod tests {
         *resolver.jwt.lock().unwrap() = Some(CachedJwt {
             token: "old".into(),
             obtained: Instant::now() - JWT_LIFETIME - Duration::from_secs(1),
+            lifetime: JWT_LIFETIME,
         });
         assert_eq!(resolver.cached_jwt(), None);
     }
@@ -703,6 +835,7 @@ mod tests {
         *resolver.jwt.lock().unwrap() = Some(CachedJwt {
             token: "old".into(),
             obtained: Instant::now() - JWT_LIFETIME - Duration::from_secs(1),
+            lifetime: JWT_LIFETIME,
         });
         assert!(resolver.amazon_credential().is_none());
     }

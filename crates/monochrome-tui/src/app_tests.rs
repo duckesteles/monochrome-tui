@@ -581,53 +581,6 @@ fn a_failed_browser_check_keeps_the_prompt_open_and_explains_itself() {
 }
 
 #[test]
-fn an_empty_token_is_not_submitted() {
-    let mut app = app();
-    app.verification_input = "   ".into();
-    assert!(app.submit_verification().is_empty());
-}
-
-#[test]
-fn a_pasted_token_is_trimmed_and_handed_over() {
-    let mut app = app();
-    app.verification_input = "  example-token-value  ".into();
-    assert_eq!(
-        app.submit_verification(),
-        vec![Effect::UseToken("example-token-value".into())]
-    );
-    assert!(app.verification_input.is_empty());
-}
-
-#[test]
-fn a_token_copied_with_quotes_is_cleaned_up() {
-    let mut app = app();
-    app.verification_input = "  \"example-token-value\"  ".into();
-    assert_eq!(
-        app.submit_verification(),
-        vec![Effect::UseToken("example-token-value".into())]
-    );
-}
-
-#[test]
-fn pasting_null_is_caught_before_it_reaches_the_gateway() {
-    for value in ["null", " null ", "\"null\""] {
-        let mut app = app();
-        app.verification_input = value.into();
-        assert!(
-            app.submit_verification().is_empty(),
-            "{value} should not be sent"
-        );
-        assert!(
-            app.verification_error
-                .as_deref()
-                .unwrap()
-                .contains("no token yet")
-        );
-        assert!(app.verification_input.is_empty());
-    }
-}
-
-#[test]
 fn a_rejected_token_keeps_the_prompt_open_with_an_explanation() {
     let mut app = app();
     app.apply(Message::NeedsVerification("http://localhost:1/".into()));
@@ -636,7 +589,6 @@ fn a_rejected_token_keeps_the_prompt_open_with_an_explanation() {
     ));
     assert_eq!(app.focus, Focus::Verification);
     assert!(app.verification_error.is_some());
-    assert!(app.verification_input.is_empty());
 }
 
 #[test]
@@ -644,12 +596,10 @@ fn a_successful_verification_clears_the_prompt_entirely() {
     let mut app = app();
     app.apply(Message::NeedsVerification("http://127.0.0.1/".into()));
     app.apply(Message::VerificationFailed("turnstile 110200".into()));
-    app.verification_input = "leftover".into();
     app.apply(Message::Verified);
     assert_eq!(app.focus, Focus::Browsing);
     assert!(app.verification_url.is_none());
     assert!(app.verification_error.is_none());
-    assert!(app.verification_input.is_empty());
 }
 
 #[test]

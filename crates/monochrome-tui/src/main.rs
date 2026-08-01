@@ -6,14 +6,13 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use monochrome_api::error::ApiError;
-use monochrome_api::jwt;
 use monochrome_api::{AuthClient, Catalog, StreamResolver};
 use monochrome_audio::{PlayRequest, Player};
 use monochrome_core::model::Track;
 use monochrome_tui::app::{App, ArtistPage, Effect, Focus, Message};
 use monochrome_tui::config::{Config, Paths};
 use monochrome_tui::dispatch;
-use monochrome_tui::secrets::{self, AMAZON_JWT, SESSION_TOKEN, Secrets};
+use monochrome_tui::secrets::{self, PLAYBACK_SESSION, SESSION_TOKEN, Secrets};
 use monochrome_tui::sync::SyncScheduler;
 use monochrome_tui::theme::Theme;
 use monochrome_tui::views;
@@ -164,7 +163,7 @@ async fn run(paths: Paths) -> Result<()> {
 
     let secrets = Secrets::new(paths.log_dir.join("credentials"));
     let resolver = StreamResolver::new(config.stream_config())?;
-    if let Some(jwt) = secrets.get(AMAZON_JWT) {
+    if let Some(jwt) = secrets.get(PLAYBACK_SESSION) {
         resolver.cache_jwt(jwt);
     }
 
@@ -406,29 +405,6 @@ fn perform(
                 }
             });
         }
-        Effect::UseToken(token) => {
-            let services = services.clone();
-            let messages = messages.clone();
-            tokio::spawn(async move {
-                services.resolver.cache_jwt(token.clone());
-                match services.resolver.validate_credential().await {
-                    Ok(()) => {
-                        let _ = services.secrets.set(AMAZON_JWT, &token);
-                        let _ = messages.send(Message::Verified);
-                    }
-                    Err(ApiError::CredentialRejected) => {
-                        services.secrets.clear(AMAZON_JWT);
-                        let reason = explain_rejection(&token, &services).await;
-                        let _ = messages.send(Message::VerificationFailed(reason));
-                    }
-                    Err(error) => {
-                        let _ = messages.send(Message::VerificationFailed(secrets::redact(
-                            &error.to_string(),
-                        )));
-                    }
-                }
-            });
-        }
         Effect::OpenBrowser => {}
 
         Effect::SignOut => {
@@ -472,13 +448,13 @@ fn start_playback(
             }
             Err(ApiError::CredentialRejected) => {
                 let _ = messages.send(Message::VerificationFailed(
-                    "the stored amazon token expired. the browser check will get a new one.".into(),
+                    "the playback session expired. the browser check will get a new one.".into(),
                 ));
             }
             Err(ApiError::TurnstileRequired) if !allow_bridge => {
                 let _ = messages.send(Message::VerificationFailed(
-                    "the amazon gateway still refuses the token. try the browser check \
-                     again, or set a bypass token in the config."
+                    "the playback service still refuses this session. try the browser check \
+                     again."
                         .into(),
                 ));
             }
@@ -490,7 +466,7 @@ fn start_playback(
                             Ok(token) => {
                                 match services.resolver.finish_verification(&token).await {
                                     Ok(()) => {
-                                        persist_amazon_jwt(&services);
+                                        persist_playback_session(&services);
                                         let _ = messages.send(Message::Verified);
                                     }
                                     Err(error) => {
@@ -517,50 +493,9 @@ fn start_playback(
     });
 }
 
-async fn explain_rejection(token: &str, services: &Arc<Services>) -> String {
-    let Some(claims) = jwt::inspect(token) else {
-        return "that did not look like a token. copy the whole value the console prints, \
-                without quotes."
-            .into();
-    };
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or_default();
-
-    if claims.is_expired(now) == Some(true) {
-        let age = claims.expires_at.map(|exp| now.saturating_sub(exp) / 60);
-        return match age {
-            Some(minutes) => format!(
-                "that token expired {minutes} minutes ago. these last about an hour, so run \
-                 the browser check again."
-            ),
-            None => "that token has expired. run the browser check again.".into(),
-        };
-    }
-
-    if let Some(issued_for) = claims.addresses.first() {
-        let seen = services.resolver.gateway_client_ip().await;
-        return match seen {
-            Some(seen) if seen != *issued_for => format!(
-                "that token was issued for {issued_for} but the gateway sees this client as \
-                 {seen}. your browser and this client are reaching the internet by different \
-                 routes, so the token cannot be shared. send both through the same route, or \
-                 set an amazon bypass token in the config."
-            ),
-            _ => "the gateway refused that token even though it looks valid and unexpired.".into(),
-        };
-    }
-
-    "the gateway refused that token. it may already have been used, or it is bound to the \
-     browser that fetched it."
-        .into()
-}
-
-fn persist_amazon_jwt(services: &Arc<Services>) {
+fn persist_playback_session(services: &Arc<Services>) {
     if let Some(jwt) = services.resolver.cached_jwt() {
-        let _ = services.secrets.set(AMAZON_JWT, &jwt);
+        let _ = services.secrets.set(PLAYBACK_SESSION, &jwt);
     }
 }
 
@@ -634,7 +569,7 @@ fn load_snapshot(paths: &Paths) -> monochrome_core::SyncDocument {
 fn forget_everything_local(services: &Arc<Services>, paths: &Paths) {
     let _ = monochrome_tui::paths::discard(&paths.snapshot);
     services.secrets.clear(SESSION_TOKEN);
-    services.secrets.clear(AMAZON_JWT);
+    services.secrets.clear(PLAYBACK_SESSION);
 }
 
 fn save_snapshot(app: &App, paths: &Paths) {

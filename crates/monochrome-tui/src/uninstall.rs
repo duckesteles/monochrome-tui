@@ -49,8 +49,12 @@ pub fn plan(paths: &Paths, binary: Option<PathBuf>) -> Vec<Target> {
             key: crate::secrets::SESSION_TOKEN,
         },
         Target::Secret {
+            what: "playback session",
+            key: crate::secrets::PLAYBACK_SESSION,
+        },
+        Target::Secret {
             what: "gateway token   ",
-            key: crate::secrets::AMAZON_JWT,
+            key: crate::secrets::LEGACY_PLAYBACK_SESSION,
         },
         Target::Directory {
             what: "settings        ",

@@ -9,6 +9,7 @@ pub struct Config {
     pub account: AccountConfig,
     pub catalog: CatalogConfig,
     pub playback: PlaybackConfig,
+    pub playback_service: PlaybackServiceConfig,
     pub amazon: AmazonConfig,
     pub deezer: DeezerConfig,
     pub ui: UiConfig,
@@ -31,6 +32,15 @@ pub struct CatalogConfig {
 pub struct PlaybackConfig {
     pub quality: String,
     pub volume: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlaybackServiceConfig {
+    pub enabled: bool,
+    pub url: String,
+    pub turnstile_site_key: String,
+    pub turnstile_action: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +116,17 @@ impl Default for AmazonConfig {
     }
 }
 
+impl Default for PlaybackServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            url: monochrome_api::stream::DEFAULT_PLAYBACK_URL.into(),
+            turnstile_site_key: monochrome_api::turnstile::DEFAULT_SITE_KEY.into(),
+            turnstile_action: monochrome_api::turnstile::DEFAULT_ACTION.into(),
+        }
+    }
+}
+
 impl Default for DeezerConfig {
     fn default() -> Self {
         Self {
@@ -139,11 +160,14 @@ impl Config {
 
     pub fn stream_config(&self) -> monochrome_api::StreamConfig {
         monochrome_api::StreamConfig {
+            playback_enabled: self.playback_service.enabled,
+            playback_url: self.playback_service.url.clone(),
             amazon_enabled: self.amazon.enabled,
             amazon_url: self.amazon.url.clone(),
             amazon_bypass_token: non_empty(&self.amazon.bypass_token),
             amazon_api_key: non_empty(&self.amazon.api_key),
-            turnstile_site_key: self.amazon.turnstile_site_key.clone(),
+            turnstile_site_key: self.playback_service.turnstile_site_key.clone(),
+            turnstile_action: self.playback_service.turnstile_action.clone(),
             deezer_enabled: self.deezer.enabled,
             deezer_url: self.deezer.url.clone(),
         }

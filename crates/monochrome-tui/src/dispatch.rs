@@ -120,7 +120,6 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
                     LoginField::Email => app.login.email.push(character),
                     LoginField::Password => app.login.password.push(character),
                 },
-                Focus::Verification => app.verification_input.push(character),
                 _ => {}
             }
             Vec::new()
@@ -138,9 +137,6 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
                         app.login.password.pop();
                     }
                 },
-                Focus::Verification => {
-                    app.verification_input.pop();
-                }
                 _ => {}
             }
             Vec::new()
@@ -153,13 +149,7 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
             Vec::new()
         }
         Action::Submit => match app.focus {
-            Focus::Verification => {
-                if app.verification_input.trim().is_empty() {
-                    vec![Effect::OpenBrowser]
-                } else {
-                    app.submit_verification()
-                }
-            }
+            Focus::Verification => vec![Effect::OpenBrowser],
             Focus::SearchInput => app.submit_search(),
             Focus::Login => {
                 if app.login.email.trim().is_empty() || app.login.password.is_empty() {
@@ -406,18 +396,10 @@ mod tests {
     }
 
     #[test]
-    fn a_pasted_verification_token_is_submitted_and_an_empty_one_opens_the_browser() {
+    fn enter_on_the_verification_screen_reopens_the_browser_tab() {
         let mut app = app();
         app.apply(Message::NeedsVerification("http://localhost:1/".into()));
         assert_eq!(press(&mut app, KeyCode::Enter), vec![Effect::OpenBrowser]);
-
-        for character in "abc".chars() {
-            press(&mut app, KeyCode::Char(character));
-        }
-        assert_eq!(
-            press(&mut app, KeyCode::Enter),
-            vec![Effect::UseToken("abc".into())]
-        );
     }
 
     #[test]

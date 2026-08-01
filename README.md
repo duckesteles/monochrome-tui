@@ -25,8 +25,8 @@ To remove it, along with everything it stored:
 monochrome --uninstall
 ```
 
-That takes out the settings, the library snapshot, the cache and both tokens
-from your system keyring, then the program itself. It lists what it will do and
+That takes out the settings, the library snapshot, the cache and every token in
+your system keyring, then the program itself. It lists what it will do and
 waits for you to type yes.
 
 <details>
@@ -50,20 +50,12 @@ Email and password. Your token is kept in the system keyring.
 Search with `/`, press enter on a track. Your saved tracks, playlists and
 history are the same ones the web app has, and changes sync back.
 
-The first time you play something, a browser tab opens so the gateway that
-serves the audio can run its Cloudflare check. A terminal cannot pass that
-check on its own. Clear it in the browser and playback starts.
+The first time you play something, a browser tab opens so the playback service
+can run a Cloudflare check. A terminal cannot pass that check on its own. Clear
+it in the browser and playback starts. Nothing is typed into the terminal.
 
-The result lasts about an hour and survives restarts, so you will rarely see
-the screen twice in one sitting.
-
-If you ever get a permanent gateway credential, put it in the config and you
-will never see the prompt at all:
-
-```toml
-[amazon]
-bypass_token = "..."
-```
+The session it gives back lasts an hour and survives restarts, so you will
+rarely see that tab twice in one sitting.
 
 ## Keys
 
@@ -89,8 +81,8 @@ monochrome --doctor              # is the account and gateway working
 monochrome --play "artist song"  # does audio work, without opening the app
 ```
 
-`--doctor` will tell you if your Amazon token has expired, which is the usual
-cause of a track refusing to play.
+`--doctor` says whether the playback service is answering and whether your
+session is still good, which covers most reasons a track refuses to play.
 
 ## Where things are kept
 
