@@ -74,8 +74,8 @@ pub async fn doctor(paths: Paths) -> Result<()> {
     }
 
     let resolver = StreamResolver::new(config.stream_config())?;
-    if let Some(jwt) = secrets.get(PLAYBACK_SESSION) {
-        resolver.cache_jwt(jwt);
+    if let Some(stored) = secrets.get(PLAYBACK_SESSION) {
+        resolver.restore_session(&stored);
     }
     match resolver.playback_health().await {
         Ok(()) => println!("playback  the service is answering"),
@@ -129,8 +129,8 @@ pub async fn probe(paths: Paths, query: String) -> Result<()> {
     let secrets = Secrets::new(paths.log_dir.join("credentials"));
     let catalog = Catalog::new(config.instances())?;
     let resolver = StreamResolver::new(config.stream_config())?;
-    if let Some(jwt) = secrets.get(PLAYBACK_SESSION) {
-        resolver.cache_jwt(jwt);
+    if let Some(stored) = secrets.get(PLAYBACK_SESSION) {
+        resolver.restore_session(&stored);
     }
 
     let track = catalog
@@ -367,6 +367,22 @@ pub(crate) fn summarise_value(key: &str, value: &serde_json::Value) -> String {
     text
 }
 
+async fn verify_in_a_browser(resolver: &StreamResolver, secrets: &Secrets) -> Result<()> {
+    let bridge = resolver.start_verification().await?;
+    let url = bridge.url();
+    println!("browser   a tab is opening at {url}");
+    if open::that_detached(&url).is_err() {
+        println!("          it did not open by itself, visit that address");
+    }
+    let token = bridge.wait_for_token().await?;
+    resolver.finish_verification(&token).await?;
+    if let Some(record) = resolver.session_for_storage() {
+        let _ = secrets.set(PLAYBACK_SESSION, &record);
+    }
+    println!("browser   checked, a session is held");
+    Ok(())
+}
+
 pub async fn play_once(paths: Paths, query: String) -> Result<()> {
     if std::env::var_os("RUST_LOG").is_some() {
         let _ = tracing_subscriber::fmt()
@@ -379,8 +395,8 @@ pub async fn play_once(paths: Paths, query: String) -> Result<()> {
     let secrets = Secrets::new(paths.log_dir.join("credentials"));
     let catalog = Catalog::new(config.instances())?;
     let resolver = StreamResolver::new(config.stream_config())?;
-    if let Some(jwt) = secrets.get(PLAYBACK_SESSION) {
-        resolver.cache_jwt(jwt);
+    if let Some(stored) = secrets.get(PLAYBACK_SESSION) {
+        resolver.restore_session(&stored);
     }
 
     let (player, events) = Player::spawn();
@@ -402,7 +418,13 @@ pub async fn play_once(paths: Paths, query: String) -> Result<()> {
             .context("nothing matched that search")?;
         println!("track     {} \u{b7} {}", track.title, track.artist_name());
 
-        let handle = resolver.resolve(&track, config.quality()).await?;
+        let handle = match resolver.resolve(&track, config.quality()).await {
+            Err(monochrome_api::error::ApiError::TurnstileRequired) => {
+                verify_in_a_browser(&resolver, &secrets).await?;
+                resolver.resolve(&track, config.quality()).await?
+            }
+            other => other?,
+        };
         if index == 0 {
             println!("source    {}", handle.source.label());
             println!(
@@ -436,6 +458,7 @@ pub async fn play_once(paths: Paths, query: String) -> Result<()> {
                     duration,
                     sample_rate,
                     channels,
+                    bits_per_sample,
                     codec,
                 }) => {
                     started = true;
@@ -445,7 +468,11 @@ pub async fn play_once(paths: Paths, query: String) -> Result<()> {
                         asked_at.elapsed().as_secs_f64()
                     );
                     println!(
-                        "started   {codec} {sample_rate} Hz, {channels} channels, {}",
+                        "started   {codec} {sample_rate} Hz, {}, {} channels, {}",
+                        bits_per_sample
+                            .map(|bits| format!("{bits} bit"))
+                            .unwrap_or_else(|| "depth unknown".into()),
+                        channels,
                         duration
                             .map(|value| format!("{value:.1} s"))
                             .unwrap_or_else(|| "length unknown".into())

@@ -45,6 +45,7 @@ pub enum Event {
         duration: Option<f64>,
         sample_rate: u32,
         channels: u16,
+        bits_per_sample: Option<u32>,
         codec: String,
     },
     Position(f64),
@@ -266,6 +267,7 @@ impl Playback {
 }
 
 struct Playback {
+    bits_per_sample: Option<u32>,
     format: Box<dyn FormatReader>,
     decoder: Box<dyn AudioDecoder>,
     track_id: u32,
@@ -377,6 +379,7 @@ fn prepare(stream: MediaSourceStream<'static>, hint: Hint) -> Result<Playback, S
     };
 
     Ok(Playback {
+        bits_per_sample: parameters.bits_per_sample,
         format,
         decoder,
         track_id,
@@ -463,6 +466,7 @@ fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) 
                         duration: opened.duration,
                         sample_rate: opened.source_rate,
                         channels: opened.source_channels as u16,
+                        bits_per_sample: opened.bits_per_sample,
                         codec: codec_name(&opened),
                     });
                     output = Some(device);

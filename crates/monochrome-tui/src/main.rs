@@ -163,8 +163,8 @@ async fn run(paths: Paths) -> Result<()> {
 
     let secrets = Secrets::new(paths.log_dir.join("credentials"));
     let resolver = StreamResolver::new(config.stream_config())?;
-    if let Some(jwt) = secrets.get(PLAYBACK_SESSION) {
-        resolver.cache_jwt(jwt);
+    if let Some(stored) = secrets.get(PLAYBACK_SESSION) {
+        resolver.restore_session(&stored);
     }
 
     let services = Arc::new(Services {
@@ -187,7 +187,7 @@ async fn run(paths: Paths) -> Result<()> {
     app.library = monochrome_core::Library::new(load_snapshot(&paths));
 
     match services.secrets.get(SESSION_TOKEN) {
-        Some(token) => restore_session(services.clone(), token, messages.clone()),
+        Some(token) => restore_account(services.clone(), token, messages.clone()),
         None => app.focus = Focus::Login,
     }
 
@@ -494,8 +494,8 @@ fn start_playback(
 }
 
 fn persist_playback_session(services: &Arc<Services>) {
-    if let Some(jwt) = services.resolver.cached_jwt() {
-        let _ = services.secrets.set(PLAYBACK_SESSION, &jwt);
+    if let Some(record) = services.resolver.session_for_storage() {
+        let _ = services.secrets.set(PLAYBACK_SESSION, &record);
     }
 }
 
@@ -530,7 +530,7 @@ fn push_sync(
     });
 }
 
-fn restore_session(services: Arc<Services>, token: String, messages: UnboundedSender<Message>) {
+fn restore_account(services: Arc<Services>, token: String, messages: UnboundedSender<Message>) {
     tokio::spawn(async move {
         match services.auth.me(&token).await {
             Ok(user) => {

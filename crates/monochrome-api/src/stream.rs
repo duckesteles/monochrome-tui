@@ -110,6 +110,60 @@ impl CachedJwt {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionRecord {
+    token: String,
+    expires_at: u64,
+}
+
+impl SessionRecord {
+    fn parse(stored: &str) -> Option<Self> {
+        let trimmed = stored.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(value) if value.is_object() => {
+                let token = value.get("token")?.as_str()?.to_string();
+                if token.is_empty() {
+                    return None;
+                }
+                Some(Self {
+                    token,
+                    expires_at: value
+                        .get("expires_at")
+                        .and_then(serde_json::Value::as_u64)?,
+                })
+            }
+            _ => Some(Self {
+                token: trimmed.to_string(),
+                expires_at: 0,
+            }),
+        }
+    }
+
+    fn to_storage(&self) -> String {
+        serde_json::json!({ "token": self.token, "expires_at": self.expires_at }).to_string()
+    }
+
+    fn time_left(&self, now: u64) -> Option<Duration> {
+        if self.expires_at == 0 {
+            return None;
+        }
+        self.expires_at
+            .checked_sub(now)
+            .filter(|left| *left > 0)
+            .map(Duration::from_secs)
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
 pub enum Verification {
     Ready,
     NeedsBrowser { url: String },
@@ -139,6 +193,29 @@ impl StreamResolver {
 
     pub fn cache_jwt(&self, token: String) {
         self.cache_session(token, JWT_LIFETIME);
+    }
+
+    pub fn restore_session(&self, stored: &str) {
+        let Some(record) = SessionRecord::parse(stored) else {
+            return;
+        };
+        let Some(left) = record.time_left(unix_now()) else {
+            return;
+        };
+        self.cache_session(record.token, left);
+    }
+
+    pub fn session_for_storage(&self) -> Option<String> {
+        let guard = self.jwt.lock().expect("jwt");
+        let cached = guard.as_ref().filter(|jwt| jwt.is_valid())?;
+        let left = cached.lifetime.saturating_sub(cached.obtained.elapsed());
+        Some(
+            SessionRecord {
+                token: cached.token.clone(),
+                expires_at: unix_now() + left.as_secs(),
+            }
+            .to_storage(),
+        )
     }
 
     fn cache_session(&self, token: String, lifetime: Duration) {
@@ -658,6 +735,75 @@ fn urlencode(value: &str) -> String {
 mod tests {
     use super::*;
     use monochrome_core::model::ArtistRef;
+
+    #[test]
+    fn a_stored_session_keeps_only_the_time_it_has_left() {
+        let record = SessionRecord {
+            token: "abc".into(),
+            expires_at: 1_000,
+        };
+        assert_eq!(record.time_left(400), Some(Duration::from_secs(600)));
+        assert_eq!(record.time_left(1_000), None, "expired is expired");
+        assert_eq!(record.time_left(5_000), None);
+    }
+
+    #[test]
+    fn a_stored_session_survives_a_round_trip() {
+        let record = SessionRecord {
+            token: "abc".into(),
+            expires_at: 1_700_000_000,
+        };
+        assert_eq!(SessionRecord::parse(&record.to_storage()), Some(record));
+    }
+
+    #[test]
+    fn a_session_stored_without_an_expiry_is_not_trusted() {
+        let legacy = SessionRecord::parse("a-bare-token").expect("parsed");
+        assert_eq!(legacy.expires_at, 0);
+        assert_eq!(
+            legacy.time_left(1_000),
+            None,
+            "an unknown age cannot be assumed fresh"
+        );
+    }
+
+    #[test]
+    fn nonsense_in_the_keyring_is_ignored_rather_than_trusted() {
+        assert_eq!(SessionRecord::parse(""), None);
+        assert_eq!(SessionRecord::parse("   "), None);
+        assert_eq!(SessionRecord::parse(r#"{"token":""}"#), None);
+        assert_eq!(SessionRecord::parse(r#"{"expires_at":5}"#), None);
+    }
+
+    #[test]
+    fn an_expired_stored_session_is_not_restored() {
+        let resolver = resolver(StreamConfig::with_defaults());
+        let stale = SessionRecord {
+            token: "old".into(),
+            expires_at: 1,
+        };
+        resolver.restore_session(&stale.to_storage());
+        assert!(!resolver.has_session());
+    }
+
+    #[test]
+    fn a_live_stored_session_is_restored_with_its_remaining_time() {
+        let resolver = resolver(StreamConfig::with_defaults());
+        let fresh = SessionRecord {
+            token: "good".into(),
+            expires_at: unix_now() + 900,
+        };
+        resolver.restore_session(&fresh.to_storage());
+        assert!(resolver.has_session());
+        assert_eq!(resolver.cached_jwt().as_deref(), Some("good"));
+
+        let again = resolver.session_for_storage().expect("stored again");
+        let parsed = SessionRecord::parse(&again).expect("parsed");
+        assert!(
+            parsed.expires_at <= fresh.expires_at,
+            "storing must not extend a session"
+        );
+    }
 
     #[test]
     fn the_gateways_own_words_survive_into_the_error() {

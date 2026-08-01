@@ -116,6 +116,10 @@ accent  = ""           # a colour name or #rrggbb; empty stays monochrome
 spacing = "compact"    # "roomy" puts a blank line between rows
 ```
 
+`quality` only reaches the fallback sources. The playback service picks the
+format itself and always answers with FLAC, so there is nothing to choose
+there.
+
 The interface never sets a background colour, so it inherits your terminal
 theme and transparency as-is.
 

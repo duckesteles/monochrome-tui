@@ -99,15 +99,23 @@ fn a_track_served_over_http_plays_from_start_to_finish() {
                 duration,
                 sample_rate,
                 channels,
+                bits_per_sample,
                 codec,
-            } => Some((*duration, *sample_rate, *channels, codec.clone())),
+            } => Some((
+                *duration,
+                *sample_rate,
+                *channels,
+                *bits_per_sample,
+                codec.clone(),
+            )),
             _ => None,
         })
         .expect("the player should report that the stream started");
 
     assert_eq!(started.1, 44_100);
     assert_eq!(started.2, 2);
-    assert_eq!(started.3, "pcm_s16le");
+    assert_eq!(started.3, Some(16));
+    assert_eq!(started.4, "pcm_s16le");
     let duration = started.0.expect("the length should be known");
     assert!((duration - 0.5).abs() < 0.05, "reported {duration}s");
 
