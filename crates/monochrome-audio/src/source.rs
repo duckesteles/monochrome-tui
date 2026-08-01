@@ -31,11 +31,15 @@ impl RangeSource {
         }
     }
 
-    fn ensure_reader(&mut self) -> IoResult<()> {
+    fn ready_reader(&mut self) -> IoResult<&mut Box<dyn Read + Send + Sync>> {
         if self.reader.is_none() {
-            self.reader = Some(self.backend.open_at(self.position)?);
+            let opened = self.backend.open_at(self.position)?;
+            self.reader = Some(opened);
         }
-        Ok(())
+        match &mut self.reader {
+            Some(reader) => Ok(reader),
+            None => Err(std::io::Error::other("the source could not be opened")),
+        }
     }
 }
 
@@ -44,9 +48,7 @@ impl Read for RangeSource {
         if buffer.is_empty() {
             return Ok(0);
         }
-        self.ensure_reader()?;
-        let reader = self.reader.as_mut().expect("reader");
-        let read = reader.read(buffer)?;
+        let read = self.ready_reader()?.read(buffer)?;
         self.position += read as u64;
         Ok(read)
     }
