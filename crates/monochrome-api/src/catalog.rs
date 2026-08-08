@@ -131,6 +131,7 @@ impl Catalog {
         }
 
         let mut failures = Vec::new();
+        let mut missing = false;
         for (index, instance) in candidates {
             let url = format!("{}{}", instance.url, path);
             match self.client.get(&url).send().await {
@@ -153,7 +154,8 @@ impl Catalog {
                     return Ok(body);
                 }
                 Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
-                    return Err(ApiError::NotFound);
+                    missing = true;
+                    failures.push(format!("{}: HTTP 404", instance.url));
                 }
                 Ok(response) => {
                     failures.push(format!("{}: HTTP {}", instance.url, response.status()));
@@ -162,6 +164,9 @@ impl Catalog {
                     failures.push(format!("{}: {error}", instance.url));
                 }
             }
+        }
+        if missing {
+            return Err(ApiError::NotFound);
         }
         Err(ApiError::AllInstancesFailed(failures))
     }
