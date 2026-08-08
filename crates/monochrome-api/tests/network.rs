@@ -109,24 +109,40 @@ async fn every_instance_failing_is_reported_as_such() {
 }
 
 #[tokio::test]
-async fn a_missing_resource_is_not_retried_across_instances() {
+async fn a_resource_no_instance_has_is_reported_as_missing() {
     let first = MockServer::start().await;
     let second = MockServer::start().await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(404))
-        .expect(1)
-        .mount(&first)
-        .await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(track_page()))
-        .expect(0)
-        .mount(&second)
-        .await;
+    for server in [&first, &second] {
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
 
     let catalog =
         Catalog::new(vec![instance(&first, 2.10), instance(&second, 2.10)]).expect("catalog");
     let error = catalog.track(1).await.expect_err("should fail");
-    assert!(matches!(error, ApiError::NotFound));
+    assert!(matches!(error, ApiError::NotFound), "{error}");
+}
+
+#[tokio::test]
+async fn an_instance_that_does_not_serve_a_route_falls_through_to_one_that_does() {
+    let stranger = MockServer::start().await;
+    let serving = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&stranger)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(track_page()))
+        .mount(&serving)
+        .await;
+
+    let catalog =
+        Catalog::new(vec![instance(&stranger, 2.10), instance(&serving, 2.10)]).expect("catalog");
+    let tracks = catalog.search_tracks("test").await.expect("tracks");
+    assert_eq!(tracks.len(), 1);
 }
 
 #[tokio::test]

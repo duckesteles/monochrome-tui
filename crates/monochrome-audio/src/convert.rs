@@ -70,9 +70,12 @@ impl LinearResampler {
         }
 
         let frames = input.len() / self.channels;
+        if frames == 0 {
+            return;
+        }
+        let input = &input[..frames * self.channels];
         if !self.primed {
-            self.previous
-                .copy_from_slice(&input[..self.channels.min(input.len())]);
+            self.previous.copy_from_slice(&input[..self.channels]);
             self.primed = true;
         }
 
@@ -180,6 +183,23 @@ mod tests {
         resampler.process(&[4.0, 5.0, 6.0, 7.0], &mut out);
         assert!(out.len() > first);
         assert!(out.windows(2).all(|pair| pair[1] >= pair[0] - 0.001));
+    }
+
+    #[test]
+    fn a_block_short_of_a_whole_frame_is_left_alone_rather_than_panicking() {
+        let mut resampler = LinearResampler::new(44_100, 48_000, 2);
+        let mut out = Vec::new();
+        resampler.process(&[0.5], &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_trailing_partial_frame_does_not_disturb_the_whole_ones() {
+        let mut resampler = LinearResampler::new(48_000, 48_000 * 2, 2);
+        let mut out = Vec::new();
+        resampler.process(&[1.0, 1.0, 2.0, 2.0, 3.0], &mut out);
+        assert!(!out.is_empty());
+        assert_eq!(out.len() % 2, 0);
     }
 
     #[test]
