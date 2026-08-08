@@ -651,3 +651,43 @@ async fn being_rate_limited_is_reported_in_plain_words() {
         .expect_err("rate limited");
     assert!(error.to_string().contains("rate limiting"), "{error}");
 }
+
+#[tokio::test]
+async fn a_search_that_reached_nothing_is_reported_rather_than_looking_empty() {
+    let dead = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&dead)
+        .await;
+
+    let catalog = Catalog::new(vec![instance(&dead, 2.10)]).expect("catalog");
+    let error = catalog
+        .search("test")
+        .await
+        .expect_err("an unreachable catalog must not read as zero matches");
+    assert!(matches!(error, ApiError::AllInstancesFailed(_)), "{error}");
+}
+
+#[tokio::test]
+async fn a_search_section_that_fails_alone_does_not_sink_the_whole_query() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .and(query_param("s", "test"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(track_page()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let catalog = Catalog::new(vec![instance(&server, 2.10)]).expect("catalog");
+    let results = catalog.search("test").await.expect("the tracks came back");
+    assert_eq!(results.tracks.len(), 1);
+    assert!(results.albums.is_empty());
+    assert!(results.artists.is_empty());
+    assert!(results.playlists.is_empty());
+}
