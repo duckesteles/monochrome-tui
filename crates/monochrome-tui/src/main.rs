@@ -313,8 +313,11 @@ fn perform(
             let services = services.clone();
             let messages = messages.clone();
             tokio::spawn(async move {
-                let results = services.catalog.search(&query).await;
-                let _ = messages.send(Message::SearchResults(Box::new(results)));
+                let message = match services.catalog.search(&query).await {
+                    Ok(results) => Message::SearchResults(Box::new(results)),
+                    Err(error) => Message::SearchFailed(secrets::redact(&error.to_string())),
+                };
+                let _ = messages.send(message);
             });
         }
         Effect::LoadAlbum(id) => {

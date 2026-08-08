@@ -148,6 +148,7 @@ pub enum Effect {
 #[derive(Debug, Clone)]
 pub enum Message {
     SearchResults(Box<SearchResults>),
+    SearchFailed(String),
     Album(Box<Album>),
     Artist(Box<ArtistPage>),
     Playlist(Box<Playlist>, Vec<Track>),
@@ -740,6 +741,11 @@ impl App {
                 self.search_pending = false;
                 self.search_results = *results;
                 self.cursor_to_start();
+                Vec::new()
+            }
+            Message::SearchFailed(reason) => {
+                self.search_pending = false;
+                self.status = Some(reason);
                 Vec::new()
             }
             Message::Album(album) => {

@@ -516,6 +516,20 @@ fn search_results_clear_the_pending_flag() {
 }
 
 #[test]
+fn a_failed_search_says_so_instead_of_searching_forever() {
+    let mut app = app();
+    app.tab = Tab::Search;
+    app.search_input = "daft punk".into();
+    app.search_pending = true;
+    app.apply(Message::SearchFailed(
+        "every catalog instance failed".into(),
+    ));
+    assert!(!app.search_pending);
+    assert_eq!(app.status.as_deref(), Some("every catalog instance failed"));
+    assert!(!app.rows().contains(&Row::Empty("searching".into())));
+}
+
+#[test]
 fn signing_out_forgets_everything_personal() {
     let mut app = app();
     app.library.set_favorite_track(&track(1), true, clock());

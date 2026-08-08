@@ -174,14 +174,27 @@ impl Config {
     }
 
     pub fn instances(&self) -> Vec<monochrome_api::Instance> {
-        let known: std::collections::HashMap<&str, f32> =
-            monochrome_api::catalog::DEFAULT_INSTANCES
-                .iter()
-                .map(|(url, version)| (*url, *version))
-                .collect();
-        self.catalog
-            .instances
+        use monochrome_api::catalog::{DEFAULT_INSTANCES, is_default, is_retired};
+
+        let configured = &self.catalog.instances;
+        let untouched = configured
             .iter()
+            .all(|url| is_default(url) || is_retired(url));
+
+        if untouched {
+            return DEFAULT_INSTANCES
+                .iter()
+                .map(|(url, version)| monochrome_api::Instance::new(*url, *version))
+                .collect();
+        }
+
+        let known: std::collections::HashMap<&str, f32> = DEFAULT_INSTANCES
+            .iter()
+            .map(|(url, version)| (*url, *version))
+            .collect();
+        configured
+            .iter()
+            .filter(|url| !is_retired(url))
             .map(|url| {
                 let version = known.get(url.as_str()).copied().unwrap_or(2.10);
                 monochrome_api::Instance::new(url.clone(), version)
@@ -352,5 +365,66 @@ mod tests {
         let instances = config.instances();
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].url, "https://my.instance");
+    }
+
+    #[test]
+    fn a_config_left_on_the_retired_defaults_moves_to_the_current_ones() {
+        let mut config = Config::default();
+        config.catalog.instances = monochrome_api::catalog::RETIRED_INSTANCES
+            .iter()
+            .map(|url| (*url).to_string())
+            .collect();
+
+        let urls: Vec<String> = config
+            .instances()
+            .into_iter()
+            .map(|instance| instance.url)
+            .collect();
+        let expected: Vec<String> = monochrome_api::catalog::DEFAULT_INSTANCES
+            .iter()
+            .map(|(url, _)| (*url).to_string())
+            .collect();
+        assert_eq!(urls, expected);
+    }
+
+    #[test]
+    fn a_retired_instance_is_dropped_without_disturbing_a_hand_picked_one() {
+        let mut config = Config::default();
+        config.catalog.instances = vec![
+            "https://hifi.geeked.wtf".into(),
+            "https://my.instance".into(),
+        ];
+
+        let urls: Vec<String> = config
+            .instances()
+            .into_iter()
+            .map(|instance| instance.url)
+            .collect();
+        assert_eq!(urls, vec!["https://my.instance".to_string()]);
+    }
+
+    #[test]
+    fn an_empty_instance_list_falls_back_to_the_defaults() {
+        let mut config = Config::default();
+        config.catalog.instances.clear();
+        assert_eq!(
+            config.instances().len(),
+            monochrome_api::catalog::DEFAULT_INSTANCES.len()
+        );
+    }
+
+    #[test]
+    fn the_shipped_defaults_survive_the_retirement_sweep() {
+        let config = Config::default();
+        let urls: Vec<String> = config
+            .instances()
+            .into_iter()
+            .map(|instance| instance.url)
+            .collect();
+        let expected: Vec<String> = monochrome_api::catalog::DEFAULT_INSTANCES
+            .iter()
+            .map(|(url, _)| (*url).to_string())
+            .collect();
+        assert_eq!(urls, expected);
     }
 }

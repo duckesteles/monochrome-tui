@@ -6,12 +6,26 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const DEFAULT_INSTANCES: &[(&str, f32)] = &[
-    ("https://eu-central.monochrome.tf", 2.10),
-    ("https://us-west.monochrome.tf", 2.10),
-    ("https://api.monochrome.tf", 2.10),
-    ("https://hifi.geeked.wtf", 2.7),
     ("https://monochrome-api.samidy.com", 2.3),
+    ("https://lol.samidy.workers.dev", 2.10),
 ];
+
+pub const RETIRED_INSTANCES: &[&str] = &[
+    "https://eu-central.monochrome.tf",
+    "https://us-west.monochrome.tf",
+    "https://api.monochrome.tf",
+    "https://hifi.geeked.wtf",
+];
+
+pub fn is_retired(url: &str) -> bool {
+    let url = url.trim_end_matches('/');
+    RETIRED_INSTANCES.contains(&url)
+}
+
+pub fn is_default(url: &str) -> bool {
+    let url = url.trim_end_matches('/');
+    DEFAULT_INSTANCES.iter().any(|(known, _)| *known == url)
+}
 
 const CACHE_ENTRIES: usize = 128;
 const CACHE_BYTES: usize = 4 * 1024 * 1024;
@@ -208,19 +222,23 @@ impl Catalog {
             .collect())
     }
 
-    pub async fn search(&self, query: &str) -> SearchResults {
+    pub async fn search(&self, query: &str) -> ApiResult<SearchResults> {
         let (tracks, albums, artists, playlists) = tokio::join!(
             self.search_tracks(query),
             self.search_albums(query),
             self.search_artists(query),
             self.search_playlists(query),
         );
-        SearchResults {
+        if let (Err(_), Err(_), Err(_), Err(reason)) = (&tracks, &albums, &artists, &playlists) {
+            tracing::debug!(query, %reason, "every search section failed");
+            return Err(tracks.unwrap_err());
+        }
+        Ok(SearchResults {
             tracks: tracks.unwrap_or_default(),
             albums: albums.unwrap_or_default(),
             artists: artists.unwrap_or_default(),
             playlists: playlists.unwrap_or_default(),
-        }
+        })
     }
 
     pub async fn track(&self, id: u64) -> ApiResult<Track> {
@@ -383,6 +401,20 @@ mod tests {
         let catalog = Catalog::with_defaults().expect("catalog");
         assert!(catalog.instances().iter().all(Instance::is_secure));
         assert_eq!(catalog.instances().len(), DEFAULT_INSTANCES.len());
+    }
+
+    #[test]
+    fn no_shipped_default_is_also_listed_as_retired() {
+        for (url, _) in DEFAULT_INSTANCES {
+            assert!(!is_retired(url), "{url} is both a default and retired");
+        }
+    }
+
+    #[test]
+    fn a_retired_instance_is_recognised_with_or_without_its_trailing_slash() {
+        assert!(is_retired("https://hifi.geeked.wtf"));
+        assert!(is_retired("https://hifi.geeked.wtf/"));
+        assert!(!is_retired("https://lol.samidy.workers.dev"));
     }
 
     #[test]
