@@ -93,6 +93,7 @@ impl Row {
 pub enum Focus {
     Browsing,
     SearchInput,
+    FilterInput,
     Login,
     Verification,
 }
@@ -185,6 +186,7 @@ pub struct App {
     pub search_input: String,
     pub search_results: SearchResults,
     pub search_pending: bool,
+    pub filter: String,
     pub now: NowPlaying,
     pub status: Option<String>,
     pub focus: Focus,
@@ -217,6 +219,7 @@ impl App {
             search_input: String::new(),
             search_results: SearchResults::default(),
             search_pending: false,
+            filter: String::new(),
             now: NowPlaying::default(),
             status: None,
             focus: Focus::Browsing,
@@ -309,7 +312,7 @@ impl App {
     }
 
     fn root_rows(&self) -> Vec<Row> {
-        match self.tab {
+        let rows = match self.tab {
             Tab::Library => match self.section {
                 LibrarySection::Tracks => rows_or_empty(
                     self.library
@@ -384,9 +387,25 @@ impl App {
                             .map(Row::Playlist),
                     );
                 }
-                rows
+                return rows;
             }
+        };
+        self.only_matching(rows)
+    }
+
+    fn only_matching(&self, rows: Vec<Row>) -> Vec<Row> {
+        let needle = crate::filter::fold(self.filter.trim());
+        if needle.is_empty() {
+            return rows;
         }
+        let kept: Vec<Row> = rows
+            .into_iter()
+            .filter(|row| row_matches(row, &needle))
+            .collect();
+        if kept.is_empty() {
+            return vec![Row::Empty("nothing matches".into())];
+        }
+        kept
     }
 
     fn with_known_length(&self, mut track: Track) -> Track {
@@ -465,6 +484,7 @@ impl App {
         if self.tab == tab && self.stack.is_empty() {
             return;
         }
+        self.filter.clear();
         self.tab = tab;
         self.stack.clear();
         self.cursors = vec![0];
@@ -883,6 +903,33 @@ fn describe(added: bool, title: &str) -> String {
         format!("saved {title}")
     } else {
         format!("removed {title}")
+    }
+}
+
+fn row_matches(row: &Row, needle: &str) -> bool {
+    use crate::filter::matches;
+    match row {
+        Row::Track(track) => {
+            matches(&track.title, needle)
+                || matches(track.artist_name(), needle)
+                || matches(track.album_title(), needle)
+        }
+        Row::Album(album) => {
+            matches(&album.title, needle)
+                || album
+                    .artist
+                    .as_ref()
+                    .is_some_and(|artist| matches(&artist.name, needle))
+        }
+        Row::Artist(artist) => matches(&artist.name, needle),
+        Row::Playlist(playlist) => {
+            matches(&playlist.title, needle)
+                || playlist
+                    .creator_name
+                    .as_deref()
+                    .is_some_and(|creator| matches(creator, needle))
+        }
+        Row::Section(_) | Row::Empty(_) => false,
     }
 }
 

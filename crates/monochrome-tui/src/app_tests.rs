@@ -735,3 +735,115 @@ fn recent_reflects_the_history() {
     app.switch_tab(Tab::Recent);
     assert!(matches!(app.rows()[0], Row::Track(ref t) if t.id == 5));
 }
+
+fn saved_track(app: &mut App, id: u64, title: &str, artist: &str) {
+    let mut entry = track(id);
+    entry.title = title.into();
+    if let Some(credited) = entry.artist.as_mut() {
+        credited.name = artist.into();
+    }
+    app.library.set_favorite_track(&entry, true, 1_000 + id);
+}
+
+fn shown_titles(app: &App) -> Vec<String> {
+    app.rows()
+        .into_iter()
+        .filter_map(|row| match row {
+            Row::Track(track) => Some(track.title),
+            Row::Album(album) => Some(album.title),
+            Row::Artist(artist) => Some(artist.name),
+            Row::Playlist(playlist) => Some(playlist.title),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_filter_narrows_the_library_to_what_matches() {
+    let mut app = app();
+    saved_track(&mut app, 1, "Dönence", "Barış Manço");
+    saved_track(&mut app, 2, "Deprem", "Malt");
+    saved_track(&mut app, 3, "Çökertme", "Cem Karaca");
+
+    app.filter = "de".into();
+    let shown = shown_titles(&app);
+    assert!(shown.contains(&"Deprem".to_string()), "{shown:?}");
+    assert!(!shown.contains(&"Çökertme".to_string()), "{shown:?}");
+}
+
+#[test]
+fn a_filter_matches_the_artist_as_well_as_the_title() {
+    let mut app = app();
+    saved_track(&mut app, 1, "Dönence", "Barış Manço");
+    saved_track(&mut app, 2, "Deprem", "Malt");
+
+    app.filter = "manço".into();
+    assert_eq!(shown_titles(&app), vec!["Dönence".to_string()]);
+}
+
+#[test]
+fn a_filter_typed_without_turkish_letters_still_finds_the_track() {
+    let mut app = app();
+    saved_track(&mut app, 1, "Aşkımız Bitti", "Dario Moreno");
+    saved_track(&mut app, 2, "İnsan İnsan", "Fazil Say");
+    saved_track(&mut app, 3, "Mavi Işıklar", "Mavi Işıklar");
+
+    app.filter = "askimiz".into();
+    assert_eq!(shown_titles(&app), vec!["Aşkımız Bitti".to_string()]);
+
+    app.filter = "insan".into();
+    assert_eq!(shown_titles(&app), vec!["İnsan İnsan".to_string()]);
+
+    app.filter = "isiklar".into();
+    assert_eq!(shown_titles(&app), vec!["Mavi Işıklar".to_string()]);
+}
+
+#[test]
+fn a_filter_that_matches_nothing_says_so() {
+    let mut app = app();
+    saved_track(&mut app, 1, "Dönence", "Barış Manço");
+
+    app.filter = "zzz".into();
+    assert_eq!(app.rows(), vec![Row::Empty("nothing matches".into())]);
+}
+
+#[test]
+fn a_filter_applies_to_the_queue_and_to_recent_too() {
+    let mut app = app();
+    let mut first = track(1);
+    first.title = "Dönence".into();
+    let mut second = track(2);
+    second.title = "Deprem".into();
+    app.queue.replace(vec![first.clone(), second.clone()], 0, 1);
+    app.library.record_play(&first, clock());
+    app.library.record_play(&second, clock());
+
+    app.switch_tab(Tab::Queue);
+    app.filter = "deprem".into();
+    assert_eq!(shown_titles(&app), vec!["Deprem".to_string()]);
+
+    app.switch_tab(Tab::Recent);
+    app.filter = "dönence".into();
+    assert_eq!(shown_titles(&app), vec!["Dönence".to_string()]);
+}
+
+#[test]
+fn switching_tabs_clears_the_filter() {
+    let mut app = app();
+    saved_track(&mut app, 1, "Dönence", "Barış Manço");
+    app.filter = "zzz".into();
+    app.switch_tab(Tab::Recent);
+    assert!(app.filter.is_empty());
+}
+
+#[test]
+fn the_search_tab_is_never_filtered() {
+    let mut app = app();
+    app.tab = Tab::Search;
+    app.search_results = results_with_everything();
+    app.filter = "zzz".into();
+    assert!(
+        app.rows().iter().any(|row| matches!(row, Row::Track(_))),
+        "catalogue results must not be narrowed by the list filter"
+    );
+}

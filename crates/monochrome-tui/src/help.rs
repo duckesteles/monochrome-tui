@@ -14,7 +14,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("tab / 1-5", "switch tab"),
             ("h l", "library section"),
-            ("/", "search"),
+            ("/", "search the catalogue, or filter the list you are on"),
             ("q", "queue"),
         ],
     ),

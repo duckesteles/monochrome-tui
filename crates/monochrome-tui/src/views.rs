@@ -80,7 +80,21 @@ fn context_line<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
             Span::styled("_", theme.strong()),
         ]));
     }
+    if app.focus == Focus::FilterInput {
+        return Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("filter: ", theme.dim()),
+            Span::styled(app.filter.clone(), theme.base()),
+            Span::styled("_", theme.strong()),
+        ]));
+    }
     let mut spans = vec![Span::raw("  "), Span::styled(app.breadcrumb(), theme.dim())];
+    if !app.filter.trim().is_empty() {
+        spans.push(Span::styled(
+            format!("   filter: {}", app.filter),
+            theme.dim(),
+        ));
+    }
     if let Some(user) = &app.user {
         spans.push(Span::styled(
             format!("   [{}]", user.display_name()),
