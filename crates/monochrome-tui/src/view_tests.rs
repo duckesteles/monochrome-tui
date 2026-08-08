@@ -516,3 +516,24 @@ fn wide_characters_are_measured_by_display_width() {
     assert!(elided.ends_with('\u{2026}'));
     assert!(unicode_width::UnicodeWidthStr::width(elided.as_str()) <= 8);
 }
+
+#[test]
+fn the_filter_field_shows_what_is_typed() {
+    let mut app = app();
+    app.focus = Focus::FilterInput;
+    app.filter = "ahmet".into();
+    let rendered = text(&draw(&app, 80, 24));
+    assert!(rendered.contains("filter: ahmet"), "{rendered}");
+}
+
+#[test]
+fn a_filter_left_in_place_stays_visible_while_browsing() {
+    let mut app = app();
+    app.focus = Focus::Browsing;
+    app.filter = "ahmet".into();
+    let rendered = text(&draw(&app, 80, 24));
+    assert!(
+        rendered.contains("filter: ahmet"),
+        "a narrowed list must say why: {rendered}"
+    );
+}

@@ -1,4 +1,4 @@
-use crate::app::{App, Effect, Focus, LoginField};
+use crate::app::{App, Effect, Focus, LoginField, Tab};
 use crate::input::{self, Action};
 use crossterm::event::KeyEvent;
 
@@ -105,7 +105,11 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
             Vec::new()
         }
         Action::FocusSearch => {
-            app.focus = Focus::SearchInput;
+            app.focus = if app.tab == Tab::Search {
+                Focus::SearchInput
+            } else {
+                Focus::FilterInput
+            };
             Vec::new()
         }
         Action::ToggleFavorite => app.toggle_favorite(),
@@ -116,6 +120,10 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
         Action::Insert(character) => {
             match app.focus {
                 Focus::SearchInput => app.search_input.push(character),
+                Focus::FilterInput => {
+                    app.filter.push(character);
+                    app.cursor_to_start();
+                }
                 Focus::Login => match app.login.field {
                     LoginField::Email => app.login.email.push(character),
                     LoginField::Password => app.login.password.push(character),
@@ -128,6 +136,10 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
             match app.focus {
                 Focus::SearchInput => {
                     app.search_input.pop();
+                }
+                Focus::FilterInput => {
+                    app.filter.pop();
+                    app.cursor_to_start();
                 }
                 Focus::Login => match app.login.field {
                     LoginField::Email => {
@@ -151,6 +163,10 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
         Action::Submit => match app.focus {
             Focus::Verification => vec![Effect::OpenBrowser],
             Focus::SearchInput => app.submit_search(),
+            Focus::FilterInput => {
+                app.focus = Focus::Browsing;
+                Vec::new()
+            }
             Focus::Login => {
                 if app.login.email.trim().is_empty() || app.login.password.is_empty() {
                     app.status = Some("enter your email and password".into());
@@ -168,6 +184,11 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
         Action::Cancel => {
             match app.focus {
                 Focus::SearchInput | Focus::Verification => app.focus = Focus::Browsing,
+                Focus::FilterInput => {
+                    app.filter.clear();
+                    app.focus = Focus::Browsing;
+                    app.cursor_to_start();
+                }
                 _ => {}
             }
             Vec::new()
@@ -197,8 +218,41 @@ mod tests {
     }
 
     #[test]
+    fn slash_filters_the_list_you_are_on_rather_than_leaving_for_the_catalogue() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('/'));
+        assert_eq!(app.focus, Focus::FilterInput);
+        assert_eq!(app.tab, Tab::Library);
+        for character in "kaya".chars() {
+            press(&mut app, KeyCode::Char(character));
+        }
+        assert_eq!(app.filter, "kaya");
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.filter, "kay");
+        assert!(
+            press(&mut app, KeyCode::Enter).is_empty(),
+            "filtering must never reach for the network"
+        );
+        assert_eq!(app.focus, Focus::Browsing);
+        assert_eq!(app.filter, "kay", "leaving the field keeps the filter");
+    }
+
+    #[test]
+    fn escaping_the_filter_field_clears_it() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('/'));
+        for character in "kaya".chars() {
+            press(&mut app, KeyCode::Char(character));
+        }
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.focus, Focus::Browsing);
+        assert!(app.filter.is_empty());
+    }
+
+    #[test]
     fn typing_reaches_the_search_field_and_enter_submits_it() {
         let mut app = app();
+        app.switch_tab(Tab::Search);
         press(&mut app, KeyCode::Char('/'));
         assert_eq!(app.focus, Focus::SearchInput);
         for character in "daft".chars() {

@@ -2,6 +2,7 @@ pub mod app;
 pub mod config;
 pub mod diagnostics;
 pub mod dispatch;
+pub mod filter;
 pub mod help;
 pub mod input;
 pub mod paths;

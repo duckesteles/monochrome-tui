@@ -688,13 +688,50 @@ fn gateway_message(body: &str) -> Option<String> {
         }
         return None;
     }
-    let flattened: String = trimmed
+    let readable = if trimmed.starts_with('<') {
+        tagged_text(trimmed, "title")
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| strip_tags(trimmed))
+    } else {
+        trimmed.to_string()
+    };
+    let flattened: String = readable
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
-        .take(160)
         .collect();
-    let cleaned = flattened.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned = flattened
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(160)
+        .collect::<String>();
     (!cleaned.is_empty()).then_some(cleaned)
+}
+
+fn tagged_text(body: &str, tag: &str) -> Option<String> {
+    let lowered = body.to_ascii_lowercase();
+    let open = lowered.find(&format!("<{tag}"))?;
+    let start = open + lowered[open..].find('>')? + 1;
+    let close = lowered[start..].find(&format!("</{tag}"))? + start;
+    Some(body[start..close].to_string())
+}
+
+fn strip_tags(body: &str) -> String {
+    let mut text = String::new();
+    let mut rest = body;
+    while let Some(start) = rest.find('<') {
+        text.push_str(&rest[..start]);
+        text.push(' ');
+        let tail = &rest[start..];
+        let closer = if tail.starts_with("<!--") { "-->" } else { ">" };
+        match tail.find(closer) {
+            Some(offset) => rest = &tail[offset + closer.len()..],
+            None => return text,
+        }
+    }
+    text.push_str(rest);
+    text
 }
 
 fn extract_track_payload(body: &str) -> ApiResult<AmazonTrack> {
@@ -838,6 +875,32 @@ mod tests {
         assert!(!message.contains('\n'));
         assert!(message.len() <= 160);
         assert!(message.contains("Bad Gateway"));
+    }
+
+    #[test]
+    fn a_full_error_page_reports_its_title_rather_than_its_boilerplate() {
+        let page = concat!(
+            "<!DOCTYPE html>\n",
+            "<!--[if lt IE 7]> <html class=\"no-js ie6 oldie\" lang=\"en-US\"> <![endif]-->\n",
+            "<html lang=\"en\">\n<head>\n",
+            "<meta charset=\"UTF-8\">\n",
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n",
+            "<title>track-api.monochrome.tf | 502: Bad gateway</title>\n",
+            "</head>\n<body>\nThe web server reported a bad gateway error.\n</body>\n</html>"
+        );
+        let message = gateway_message(page).expect("something to show");
+        assert_eq!(message, "track-api.monochrome.tf | 502: Bad gateway");
+        assert!(!message.contains("DOCTYPE"), "{message}");
+        assert!(!message.contains('<'), "{message}");
+    }
+
+    #[test]
+    fn a_suspended_service_page_says_it_was_suspended() {
+        let page = "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<title>Service Suspended</title>\n</head>\n<body>\nThis service has been suspended by its owner.\n</body>\n</html>";
+        assert_eq!(
+            gateway_message(page).expect("something to show"),
+            "Service Suspended"
+        );
     }
 
     #[test]

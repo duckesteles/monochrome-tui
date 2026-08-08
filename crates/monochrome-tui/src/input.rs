@@ -49,7 +49,9 @@ pub fn resolve(key: KeyEvent, focus: Focus) -> Action {
     }
 
     match focus {
-        Focus::SearchInput | Focus::Login | Focus::Verification => text_entry(key, focus),
+        Focus::SearchInput | Focus::FilterInput | Focus::Login | Focus::Verification => {
+            text_entry(key, focus)
+        }
         Focus::Browsing => browsing(key),
     }
 }
