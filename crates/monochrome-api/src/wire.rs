@@ -195,30 +195,9 @@ pub struct WirePlaylist {
 
 #[derive(Debug, Deserialize)]
 pub struct PlaylistEnvelope {
-    #[serde(flatten)]
     pub playlist: WirePlaylist,
     #[serde(default)]
     pub items: Vec<WireAlbumItem>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ManifestEnvelope {
-    pub data: ManifestResource,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ManifestResource {
-    pub attributes: ManifestAttributes,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ManifestAttributes {
-    #[serde(default)]
-    pub uri: Option<String>,
-    #[serde(default, rename = "trackPresentation")]
-    pub presentation: Option<String>,
-    #[serde(default)]
-    pub formats: Vec<String>,
 }
 
 fn quality_of(tags: Option<&MediaMetadata>, fallback: Option<&str>) -> Quality {

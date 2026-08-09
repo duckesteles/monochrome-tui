@@ -85,6 +85,121 @@ async fn the_healthy_instance_becomes_preferred_after_a_failover() {
     );
 }
 
+fn playlist_page(offset: u32, count: usize, total: u32) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = (0..count)
+        .map(|index| {
+            json!({
+                "item": {
+                    "id": offset + index as u32,
+                    "title": format!("Track {}", offset as usize + index),
+                    "duration": 200
+                },
+                "type": "track"
+            })
+        })
+        .collect();
+    json!({
+        "version": "2.10",
+        "playlist": {
+            "uuid": "abc-123",
+            "title": "A Long Playlist",
+            "numberOfTracks": total,
+            "creator": { "name": "TIDAL" }
+        },
+        "items": items
+    })
+}
+
+#[tokio::test]
+async fn a_playlist_arrives_whole_rather_than_one_page_deep() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/playlist/"))
+        .and(query_param("offset", "100"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(playlist_page(100, 50, 150)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/playlist/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(playlist_page(0, 100, 150)))
+        .mount(&server)
+        .await;
+
+    let catalog = Catalog::new(vec![instance(&server, ApiVersion::new(2, 10))]).expect("catalog");
+    let (playlist, tracks) = catalog.playlist("abc-123").await.expect("playlist");
+    assert_eq!(playlist.title, "A Long Playlist");
+    assert_eq!(playlist.number_of_tracks, Some(150));
+    assert_eq!(tracks.len(), 150, "the second page was never asked for");
+    assert_eq!(tracks[0].id, 0);
+    assert_eq!(tracks[149].id, 149);
+}
+
+#[tokio::test]
+async fn a_service_that_ignores_the_offset_does_not_loop_forever() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/playlist/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(playlist_page(0, 100, 900)))
+        .mount(&server)
+        .await;
+
+    let catalog = Catalog::new(vec![instance(&server, ApiVersion::new(2, 10))]).expect("catalog");
+    let (_, tracks) = catalog.playlist("abc-123").await.expect("playlist");
+    assert_eq!(
+        tracks.len(),
+        100,
+        "a page that repeats itself must stop the walk, not extend it"
+    );
+}
+
+#[tokio::test]
+async fn a_playlist_wrapped_in_data_is_read_the_same_way() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/playlist/"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "data": playlist_page(0, 4, 4) })),
+        )
+        .mount(&server)
+        .await;
+
+    let catalog = Catalog::new(vec![instance(&server, ApiVersion::new(2, 10))]).expect("catalog");
+    let (playlist, tracks) = catalog.playlist("abc-123").await.expect("playlist");
+    assert_eq!(playlist.uuid, "abc-123");
+    assert_eq!(tracks.len(), 4);
+}
+
+#[tokio::test]
+async fn an_album_longer_than_a_page_arrives_whole() {
+    let server = MockServer::start().await;
+    let page = |offset: u32, count: usize| {
+        let items: Vec<serde_json::Value> = (0..count)
+            .map(|index| {
+                json!({ "item": { "id": offset + index as u32, "title": "T", "duration": 100 } })
+            })
+            .collect();
+        json!({
+            "version": "2.10",
+            "data": { "id": 5, "title": "Everything", "numberOfTracks": 600, "items": items }
+        })
+    };
+    Mock::given(method("GET"))
+        .and(path("/album/"))
+        .and(query_param("offset", "500"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(500, 100)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/album/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(0, 500)))
+        .mount(&server)
+        .await;
+
+    let catalog = Catalog::new(vec![instance(&server, ApiVersion::new(2, 10))]).expect("catalog");
+    let album = catalog.album(5).await.expect("album");
+    assert_eq!(album.tracks.len(), 600);
+}
+
 #[tokio::test]
 async fn a_repeated_request_is_served_from_cache() {
     let server = MockServer::start().await;

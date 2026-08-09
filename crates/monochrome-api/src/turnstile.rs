@@ -6,6 +6,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub const DEFAULT_SITE_KEY: &str = "0x4AAAAAADgxqF6QVMm0GLHH";
 pub const DEFAULT_ACTION: &str = "auth";
 const SOLVE_TIMEOUT: Duration = Duration::from_secs(120);
+const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 
 pub struct Bridge {
@@ -112,17 +113,25 @@ impl Bridge {
 }
 
 async fn read_request(stream: &mut TcpStream) -> Option<String> {
+    tokio::time::timeout(HEADER_TIMEOUT, read_header(stream))
+        .await
+        .ok()?
+}
+
+async fn read_header(stream: &mut TcpStream) -> Option<String> {
     let mut buffer = vec![0u8; MAX_REQUEST_BYTES];
     let mut filled = 0;
+    let mut scanned = 0;
     loop {
         let read = stream.read(&mut buffer[filled..]).await.ok()?;
         if read == 0 {
             break;
         }
         filled += read;
-        if buffer[..filled].windows(4).any(|w| w == b"\r\n\r\n") || filled == buffer.len() {
+        if buffer[scanned..filled].windows(4).any(|w| w == b"\r\n\r\n") || filled == buffer.len() {
             break;
         }
+        scanned = filled.saturating_sub(3);
     }
     Some(String::from_utf8_lossy(&buffer[..filled]).into_owned())
 }
@@ -423,6 +432,66 @@ mod tests {
         stream.read_to_string(&mut response).await.expect("read");
         assert!(response.contains("403 Forbidden"));
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_request_split_across_many_reads_is_still_understood() {
+        let bridge = Bridge::bind(DEFAULT_SITE_KEY, DEFAULT_ACTION)
+            .await
+            .expect("bridge");
+        let port = bridge.listener.local_addr().unwrap().port();
+        let url = bridge.url();
+        let nonce = url.rsplit("n=").next().unwrap().to_string();
+        let task = tokio::spawn(bridge.wait_for_token());
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        let request = format!("GET /token?n={nonce}&t=dribbled HTTP/1.1\r\nHost: x\r\n\r\n");
+        for chunk in request.as_bytes().chunks(3) {
+            stream.write_all(chunk).await.expect("write");
+            tokio::task::yield_now().await;
+        }
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response).await;
+
+        assert_eq!(task.await.expect("join").expect("token"), "dribbled");
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_says_nothing_does_not_hold_the_bridge_shut() {
+        let bridge = Bridge::bind(DEFAULT_SITE_KEY, DEFAULT_ACTION)
+            .await
+            .expect("bridge");
+        let port = bridge.listener.local_addr().unwrap().port();
+        let url = bridge.url();
+        let nonce = url.rsplit("n=").next().unwrap().to_string();
+        let task = tokio::spawn(bridge.wait_for_token());
+
+        for _ in 0..3 {
+            let silent = TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("connect");
+            drop(silent);
+        }
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        let request = format!("GET /token?n={nonce}&t=got-through HTTP/1.1\r\nHost: x\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response).await;
+
+        assert_eq!(task.await.expect("join").expect("token"), "got-through");
+    }
+
+    #[test]
+    fn a_silent_caller_is_given_a_deadline_well_inside_the_solve_window() {
+        assert!(
+            HEADER_TIMEOUT < SOLVE_TIMEOUT,
+            "a stalled connection must not eat the whole verification budget"
+        );
     }
 
     #[tokio::test]

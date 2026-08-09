@@ -1,7 +1,7 @@
 use crate::cache::Cache;
 use crate::error::{ApiError, ApiResult};
 use crate::wire::*;
-use monochrome_core::model::{Album, Artist, Playlist, Quality, Track};
+use monochrome_core::model::{Album, Artist, Playlist, Track};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,6 +28,9 @@ pub fn is_default(url: &str) -> bool {
 }
 
 pub const RECOMMENDATIONS_SINCE: ApiVersion = ApiVersion::new(2, 4);
+
+const ALBUM_PAGE: u32 = 500;
+const MAX_COLLECTED_TRACKS: u32 = 10_000;
 
 const CACHE_ENTRIES: usize = 128;
 const CACHE_BYTES: usize = 4 * 1024 * 1024;
@@ -243,6 +246,20 @@ impl Catalog {
         serde_json::from_str(&body).map_err(|error| ApiError::Decode(error.to_string()))
     }
 
+    async fn fetch_wrapped_or_bare<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> ApiResult<T> {
+        let body = self.fetch(path, None).await?;
+        let value: serde_json::Value =
+            serde_json::from_str(&body).map_err(|error| ApiError::Decode(error.to_string()))?;
+        let inner = match value.get("data") {
+            Some(data) if !data.is_null() => data,
+            _ => &value,
+        };
+        T::deserialize(inner).map_err(|error| ApiError::Decode(error.to_string()))
+    }
+
     pub async fn search_tracks(&self, query: &str) -> ApiResult<Vec<Track>> {
         let path = format!("/search/?s={}", encode(query));
         let envelope: Envelope<Page<WireTrack>> = self.fetch_json(&path, None).await?;
@@ -331,9 +348,34 @@ impl Catalog {
 
     pub async fn album(&self, id: u64) -> ApiResult<Album> {
         let envelope: Envelope<WireAlbum> = self
-            .fetch_json(&format!("/album/?id={id}&limit=500"), None)
+            .fetch_json(&format!("/album/?id={id}&limit={ALBUM_PAGE}"), None)
             .await?;
-        Ok(envelope.data.into_core())
+        let mut album = envelope.data.into_core();
+
+        let wanted = album
+            .number_of_tracks
+            .unwrap_or_default()
+            .min(MAX_COLLECTED_TRACKS) as usize;
+        let mut opened_with = album.tracks.first().map(|track| track.id);
+
+        while album.tracks.len() < wanted {
+            let offset = album.tracks.len();
+            let page: Envelope<WireAlbum> = self
+                .fetch_json(
+                    &format!("/album/?id={id}&offset={offset}&limit={ALBUM_PAGE}"),
+                    None,
+                )
+                .await?;
+            let more = page.data.into_core().tracks;
+            let starts_with = more.first().map(|track| track.id);
+            if more.is_empty() || starts_with == opened_with {
+                break;
+            }
+            opened_with = starts_with;
+            album.tracks.extend(more);
+        }
+
+        Ok(album)
     }
 
     pub async fn artist(&self, id: u64) -> ApiResult<Artist> {
@@ -364,20 +406,44 @@ impl Catalog {
     }
 
     pub async fn playlist(&self, uuid: &str) -> ApiResult<(Playlist, Vec<Track>)> {
-        let envelope: Envelope<PlaylistEnvelope> = self
-            .fetch_json(&format!("/playlist/?id={}", encode(uuid)), None)
+        let id = encode(uuid);
+        let first: PlaylistEnvelope = self
+            .fetch_wrapped_or_bare(&format!("/playlist/?id={id}"))
             .await?;
-        let tracks = envelope
-            .data
+        let playlist = first
+            .playlist
+            .into_core()
+            .ok_or_else(|| ApiError::Decode("playlist is missing its uuid".into()))?;
+
+        let mut tracks: Vec<Track> = first
             .items
             .into_iter()
             .map(|entry| entry.item.into_core())
             .collect();
-        let playlist = envelope
-            .data
-            .playlist
-            .into_core()
-            .ok_or_else(|| ApiError::Decode("playlist is missing its uuid".into()))?;
+        let wanted = playlist
+            .number_of_tracks
+            .unwrap_or_default()
+            .min(MAX_COLLECTED_TRACKS) as usize;
+        let mut opened_with = tracks.first().map(|track| track.id);
+
+        while tracks.len() < wanted {
+            let offset = tracks.len();
+            let page: PlaylistEnvelope = self
+                .fetch_wrapped_or_bare(&format!("/playlist/?id={id}&offset={offset}"))
+                .await?;
+            let more: Vec<Track> = page
+                .items
+                .into_iter()
+                .map(|entry| entry.item.into_core())
+                .collect();
+            let starts_with = more.first().map(|track| track.id);
+            if more.is_empty() || starts_with == opened_with {
+                break;
+            }
+            opened_with = starts_with;
+            tracks.extend(more);
+        }
+
         Ok((playlist, tracks))
     }
 
@@ -394,15 +460,6 @@ impl Catalog {
             .into_iter()
             .filter_map(|entry| entry.into_track().map(WireTrack::into_core))
             .collect())
-    }
-
-    pub async fn track_manifest(&self, id: u64, quality: Quality) -> ApiResult<ManifestAttributes> {
-        let path = format!(
-            "/trackManifests/?id={id}&quality={}&adaptive=false&formats=flac",
-            quality.as_tidal()
-        );
-        let envelope: Envelope<ManifestEnvelope> = self.fetch_json(&path, None).await?;
-        Ok(envelope.data.data.attributes)
     }
 }
 
