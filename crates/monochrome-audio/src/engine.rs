@@ -232,9 +232,7 @@ fn build_output(
                 }
                 let filled = callback_shared.ring.pop(output);
                 let level = callback_shared.volume() * callback_shared.gain();
-                for sample in output[..filled].iter_mut() {
-                    *sample *= level;
-                }
+                apply_level(&mut output[..filled], level);
                 output[filled..].fill(0.0);
                 let channels = callback_shared
                     .output_channels
@@ -277,6 +275,12 @@ struct Playback {
     resampler: LinearResampler,
     finished: bool,
     failed: bool,
+}
+
+fn apply_level(output: &mut [f32], level: f32) {
+    for sample in output.iter_mut() {
+        *sample = (*sample * level).clamp(-1.0, 1.0);
+    }
 }
 
 fn open(request: &PlayRequest) -> Result<Playback, String> {
@@ -726,6 +730,26 @@ mod tests {
         assert_eq!(shared.volume(), 1.0);
         assert_eq!(shared.gain(), 1.0);
         assert_eq!(shared.frames.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_boost_can_never_push_a_sample_past_full_scale() {
+        let mut output = [0.9, -0.9, 0.2, -0.2];
+        apply_level(&mut output, 2.0);
+        assert_eq!(output, [1.0, -1.0, 0.4, -0.4]);
+        assert!(
+            output.iter().all(|sample| sample.abs() <= 1.0),
+            "a sample outside full scale reaches the sound card as noise"
+        );
+    }
+
+    #[test]
+    fn ordinary_levels_pass_through_untouched() {
+        let mut output = [0.5, -0.25];
+        apply_level(&mut output, 1.0);
+        assert_eq!(output, [0.5, -0.25]);
+        apply_level(&mut output, 0.0);
+        assert_eq!(output, [0.0, 0.0]);
     }
 
     #[test]

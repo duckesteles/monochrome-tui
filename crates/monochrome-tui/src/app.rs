@@ -133,6 +133,7 @@ pub enum Effect {
     LoadArtist(u64),
     LoadPlaylist(String),
     LoadTrackDetails(Vec<u64>),
+    Radio(u64),
     Play(Box<Track>),
     Pause,
     Resume,
@@ -154,6 +155,7 @@ pub enum Message {
     Artist(Box<ArtistPage>),
     Playlist(Box<Playlist>, Vec<Track>),
     TrackDetails(Vec<Track>),
+    Radio(Vec<Track>),
     Sync(Box<SyncDocument>),
     SignedIn(Box<User>),
     SignInFailed(String),
@@ -204,6 +206,7 @@ pub struct App {
     pub verification_error: Option<String>,
     pub syncing: bool,
     pub quit: bool,
+    radio_seed: Option<String>,
     clock: fn() -> u64,
 }
 
@@ -237,6 +240,7 @@ impl App {
             verification_error: None,
             syncing: false,
             quit: false,
+            radio_seed: None,
             clock: now_ms,
         }
     }
@@ -673,6 +677,43 @@ impl App {
         }
     }
 
+    pub fn start_radio(&mut self) -> Vec<Effect> {
+        let seed = match self.selected_row() {
+            Some(Row::Track(track)) => Some(track),
+            _ => self.now.track.clone(),
+        };
+        let Some(seed) = seed else {
+            self.status = Some("highlight a track to build a radio from".into());
+            return Vec::new();
+        };
+        self.radio_seed = Some(seed.display_title());
+        self.status = Some(format!("looking for tracks like {}", seed.display_title()));
+        vec![Effect::Radio(seed.id)]
+    }
+
+    fn fill_radio(&mut self, tracks: Vec<Track>) {
+        let seed = self.radio_seed.take();
+        let like = match &seed {
+            Some(title) => format!(" like {title}"),
+            None => String::new(),
+        };
+        let known: std::collections::HashSet<u64> =
+            self.queue.items().iter().map(|track| track.id).collect();
+        let mut added = 0;
+        for track in tracks {
+            if known.contains(&track.id) {
+                continue;
+            }
+            self.queue.append(track);
+            added += 1;
+        }
+        self.status = Some(match added {
+            0 => format!("nothing new{like} to queue"),
+            1 => format!("queued 1 track{like}"),
+            many => format!("queued {many} tracks{like}"),
+        });
+    }
+
     pub fn toggle_favorite(&mut self) -> Vec<Effect> {
         let Some(row) = self.selected_row() else {
             return Vec::new();
@@ -774,6 +815,10 @@ impl App {
             }
             Message::Artist(page) => {
                 self.replace_top(Screen::Artist(page));
+                Vec::new()
+            }
+            Message::Radio(tracks) => {
+                self.fill_radio(tracks);
                 Vec::new()
             }
             Message::TrackDetails(details) => {

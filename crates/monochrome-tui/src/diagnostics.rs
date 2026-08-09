@@ -35,6 +35,20 @@ pub async fn doctor(paths: Paths) -> Result<()> {
         }
         Err(error) => println!("catalog   FAILED: {}", secrets::redact(&error.to_string())),
     }
+    for instance in catalog.instances() {
+        println!(
+            "instance  {}",
+            match catalog.reported_version(instance).await {
+                Some(reported) if reported == instance.version =>
+                    format!("{} speaks {reported}", instance.url),
+                Some(reported) => format!(
+                    "{} speaks {reported}, this build assumes {} and may skip routes it has",
+                    instance.url, instance.version
+                ),
+                None => format!("{} would not say which version it speaks", instance.url),
+            }
+        );
+    }
 
     let auth = AuthClient::new(&config.account.auth_url)?;
     match secrets.get(SESSION_TOKEN) {
@@ -112,16 +126,27 @@ pub async fn doctor(paths: Paths) -> Result<()> {
             ),
         }
     }
-    println!(
-        "deezer    {}",
-        if config.deezer.enabled {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
+    println!("deezer    {}", describe_deezer(&resolver).await);
 
     Ok(())
+}
+
+async fn describe_deezer(resolver: &StreamResolver) -> String {
+    match resolver.deezer_health().await {
+        Err(ApiError::NoSourceEnabled) => "switched off".into(),
+        Err(error) => format!(
+            "the fallback is unreachable: {}",
+            secrets::redact(&error.to_string())
+        ),
+        Ok(report) if report.ok && report.accounts.available > 0 => format!(
+            "standing by, {} of {} accounts alive",
+            report.accounts.available, report.accounts.total
+        ),
+        Ok(report) => format!(
+            "REACHABLE BUT USELESS, {} of {} accounts alive, nothing can fall back to it",
+            report.accounts.available, report.accounts.total
+        ),
+    }
 }
 
 pub async fn probe(paths: Paths, query: String) -> Result<()> {
@@ -256,6 +281,23 @@ pub async fn probe(paths: Paths, query: String) -> Result<()> {
             .map(|host| format!("https://{host}/... (address hidden)"))
             .unwrap_or_else(|| "unreadable".into())
     );
+    let (replay_gain, peak) = handle.levelling(&track);
+    println!(
+        "levelling {}",
+        match replay_gain {
+            Some(gain) => format!(
+                "{gain:+.2} dB from {}, peak {}",
+                if handle.loudness.is_some() {
+                    "the stream itself"
+                } else {
+                    "the catalogue"
+                },
+                peak.map(|peak| format!("{peak:.4}"))
+                    .unwrap_or_else(|| "unreported".into())
+            ),
+            None => "nothing measured, playing untouched".into(),
+        }
+    );
 
     let url = handle.url.clone();
     let headers = handle.headers.clone();
@@ -318,39 +360,56 @@ pub async fn probe(paths: Paths, query: String) -> Result<()> {
     Ok(())
 }
 
+const SUMMARY_ITEMS: usize = 8;
+const SUMMARY_DEPTH: usize = 12;
+
 pub(crate) fn summarise_payload(value: &serde_json::Value, prefix: &str) -> Vec<String> {
+    summarise_at(value, prefix, 0)
+}
+
+fn summarise_at(value: &serde_json::Value, path: &str, depth: usize) -> Vec<String> {
     let mut lines = Vec::new();
+    if depth >= SUMMARY_DEPTH {
+        lines.push(format!("{path} = <nested too deeply to show>"));
+        return lines;
+    }
     match value {
         serde_json::Value::Object(fields) => {
             for (key, entry) in fields {
-                let path = if prefix.is_empty() {
+                let below = if path.is_empty() {
                     key.clone()
                 } else {
-                    format!("{prefix}.{key}")
+                    format!("{path}.{key}")
                 };
-                match entry {
-                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                        lines.extend(summarise_payload(entry, &path))
-                    }
-                    other => lines.push(format!("{path} = {}", summarise_value(key, other))),
-                }
+                lines.extend(summarise_at(entry, &below, depth + 1));
             }
         }
-        serde_json::Value::Array(items) => {
-            lines.push(format!("{prefix} = [{} items]", items.len()));
+        serde_json::Value::Array(items) if items.is_empty() => {
+            lines.push(format!("{path} = nothing"));
         }
-        other => lines.push(format!("{prefix} = {other}")),
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().take(SUMMARY_ITEMS).enumerate() {
+                lines.extend(summarise_at(item, &format!("{path}[{index}]"), depth + 1));
+            }
+            if let Some(rest) = items.len().checked_sub(SUMMARY_ITEMS).filter(|n| *n > 0) {
+                lines.push(format!("{path} = and {rest} more"));
+            }
+        }
+        other => lines.push(format!("{path} = {}", summarise_value(path, other))),
     }
     lines
 }
 
-pub(crate) fn summarise_value(key: &str, value: &serde_json::Value) -> String {
-    let lowered = key.to_ascii_lowercase();
+pub(crate) fn summarise_value(path: &str, value: &serde_json::Value) -> String {
+    let lowered = path.to_ascii_lowercase();
     let text = match value {
         serde_json::Value::String(text) => text.clone(),
         other => other.to_string(),
     };
-    if lowered.contains("key") && text.len() > 8 {
+    let sensitive = ["key", "secret", "token", "credential"]
+        .iter()
+        .any(|word| lowered.contains(word));
+    if sensitive && text.len() > 8 {
         return format!("<{} characters, hidden>", text.len());
     }
     if lowered.contains("url") && text.starts_with("https://") {
@@ -359,8 +418,9 @@ pub(crate) fn summarise_value(key: &str, value: &serde_json::Value) -> String {
             None => format!("<{} characters, hidden>", text.len()),
         };
     }
-    if text.len() > 96 {
-        return format!("{}... ({} characters)", &text[..96], text.len());
+    if text.chars().count() > 96 {
+        let head: String = text.chars().take(96).collect();
+        return format!("{head}... ({} characters)", text.chars().count());
     }
     text
 }
@@ -436,11 +496,12 @@ pub async fn play_once(paths: Paths, query: String) -> Result<()> {
         }
 
         let asked_at = std::time::Instant::now();
+        let (replay_gain, peak) = handle.levelling(&track);
         player.play(PlayRequest {
             url: handle.url,
             headers: handle.headers,
-            replay_gain: track.replay_gain,
-            peak: track.peak,
+            replay_gain,
+            peak,
             decryption_key: handle.decryption_key,
         });
 
@@ -603,11 +664,96 @@ mod tests {
         lines.sort();
         assert!(lines.contains(&"asin = B0064UPUDC".to_string()));
         assert!(lines.contains(&"match.confidence = high".to_string()));
+        assert!(lines.contains(&"available_qualities[0] = HD".to_string()));
+        assert!(lines.contains(&"available_qualities[1] = UHD".to_string()));
+    }
+
+    #[test]
+    fn what_the_service_offers_is_shown_rather_than_counted() {
+        let payload = json!({
+            "playback": [{
+                "kind": "audio",
+                "delivery": "direct",
+                "source": "amazon",
+                "quality": "HI_RES_LOSSLESS",
+                "replay_gain": { "track_gain_db": -7.5 }
+            }]
+        });
+        let lines = summarise_payload(&payload, "");
+        assert!(lines.contains(&"playback[0].source = amazon".to_string()));
+        assert!(lines.contains(&"playback[0].delivery = direct".to_string()));
+        assert!(lines.contains(&"playback[0].replay_gain.track_gain_db = -7.5".to_string()));
+    }
+
+    #[test]
+    fn a_long_list_is_cut_off_and_says_how_much_it_left_out() {
+        let payload = json!({ "sources": (0..20).collect::<Vec<u32>>() });
+        let lines = summarise_payload(&payload, "");
+        assert!(lines.contains(&"sources[7] = 7".to_string()));
+        assert!(!lines.iter().any(|line| line.contains("sources[8]")));
+        assert!(lines.contains(&"sources = and 12 more".to_string()));
+    }
+
+    #[test]
+    fn an_empty_list_says_so_instead_of_vanishing() {
+        let lines = summarise_payload(&json!({ "playback": [] }), "");
+        assert_eq!(lines, vec!["playback = nothing".to_string()]);
+    }
+
+    #[test]
+    fn a_key_inside_a_list_is_hidden_like_any_other() {
+        let payload = json!({
+            "playback": [{ "decryption_key": "00112233445566778899aabbccddeeff" }]
+        });
+        let lines = summarise_payload(&payload, "");
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("available_qualities"))
+            lines.iter().all(|line| !line.contains("00112233")),
+            "{lines:?}"
         );
+        assert!(lines.iter().any(|line| line.contains("hidden")));
+    }
+
+    #[test]
+    fn a_key_hidden_under_an_innocent_field_name_is_still_hidden() {
+        let payload = json!({
+            "playback": [{
+                "encryption": {
+                    "scheme": "cenc-aes-ctr",
+                    "key": { "encoding": "hex", "value": "144db53f4b48d49a8fbd36638f9bc0c0" }
+                }
+            }]
+        });
+        let lines = summarise_payload(&payload, "");
+        assert!(
+            lines.iter().all(|line| !line.contains("144db53f")),
+            "the key leaked: {lines:?}"
+        );
+        assert!(lines.contains(&"playback[0].encryption.scheme = cenc-aes-ctr".to_string()));
+    }
+
+    #[test]
+    fn a_bearer_token_is_hidden_the_same_way_a_key_is() {
+        let shown = summarise_value("auth.access_token", &json!("amp_29b2lIr4mze4tK-P8QDOxfMZ9"));
+        assert!(!shown.contains("amp_"), "{shown}");
+        assert!(shown.contains("hidden"));
+    }
+
+    #[test]
+    fn a_long_value_written_in_another_alphabet_is_cut_without_panicking() {
+        let title = "Işıklar Sönmesin ".repeat(20);
+        let shown = summarise_value("title", &json!(title));
+        assert!(shown.contains("characters"));
+        assert!(shown.chars().count() < 140, "{shown}");
+    }
+
+    #[test]
+    fn a_payload_that_nests_without_end_is_cut_off_rather_than_followed() {
+        let mut payload = json!("bottom");
+        for _ in 0..64 {
+            payload = json!({ "next": payload });
+        }
+        let lines = summarise_payload(&payload, "");
+        assert!(lines.iter().any(|line| line.contains("nested too deeply")));
     }
 
     #[test]

@@ -5,9 +5,9 @@ use monochrome_core::model::{Album, Artist, Playlist, Quality, Track};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub const DEFAULT_INSTANCES: &[(&str, f32)] = &[
-    ("https://monochrome-api.samidy.com", 2.3),
-    ("https://lol.samidy.workers.dev", 2.10),
+pub const DEFAULT_INSTANCES: &[(&str, ApiVersion)] = &[
+    ("https://monochrome-api.samidy.com", ApiVersion::new(2, 3)),
+    ("https://lol.samidy.workers.dev", ApiVersion::new(2, 10)),
 ];
 
 pub const RETIRED_INSTANCES: &[&str] = &[
@@ -27,19 +27,51 @@ pub fn is_default(url: &str) -> bool {
     DEFAULT_INSTANCES.iter().any(|(known, _)| *known == url)
 }
 
+pub const RECOMMENDATIONS_SINCE: ApiVersion = ApiVersion::new(2, 4);
+
 const CACHE_ENTRIES: usize = 128;
 const CACHE_BYTES: usize = 4 * 1024 * 1024;
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ApiVersion {
+    pub major: u32,
+    pub minor: u32,
+}
+
+impl ApiVersion {
+    pub const fn new(major: u32, minor: u32) -> Self {
+        Self { major, minor }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let (major, minor) = match text.split_once('.') {
+            Some((major, rest)) => {
+                let minor = rest.split(['.', '-', '+']).next().unwrap_or_default();
+                (major, minor)
+            }
+            None => (text, "0"),
+        };
+        Some(Self::new(major.parse().ok()?, minor.parse().unwrap_or(0)))
+    }
+}
+
+impl std::fmt::Display for ApiVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Instance {
     pub url: String,
-    pub version: f32,
+    pub version: ApiVersion,
 }
 
 impl Instance {
-    pub fn new(url: impl Into<String>, version: f32) -> Self {
+    pub fn new(url: impl Into<String>, version: ApiVersion) -> Self {
         Self {
             url: url.into().trim_end_matches('/').to_string(),
             version,
@@ -49,6 +81,23 @@ impl Instance {
     pub fn is_secure(&self) -> bool {
         crate::is_transport_allowed(&self.url)
     }
+}
+
+fn version_in(value: &serde_json::Value) -> Option<ApiVersion> {
+    if let Some(version) = value
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .and_then(ApiVersion::parse)
+    {
+        return Some(version);
+    }
+    value
+        .get("instances")?
+        .as_array()?
+        .iter()
+        .filter_map(|entry| entry.get("version")?.as_str())
+        .filter_map(ApiVersion::parse)
+        .max()
 }
 
 #[derive(Debug, Default, Clone)]
@@ -108,7 +157,21 @@ impl Catalog {
         self.instances.get(index)
     }
 
-    fn ordered(&self, min_version: Option<f32>) -> Vec<(usize, &Instance)> {
+    pub async fn reported_version(&self, instance: &Instance) -> Option<ApiVersion> {
+        let body = self
+            .client
+            .get(format!("{}/", instance.url))
+            .send()
+            .await
+            .ok()?
+            .text()
+            .await
+            .ok()?;
+        let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+        version_in(&value)
+    }
+
+    fn ordered(&self, min_version: Option<ApiVersion>) -> Vec<(usize, &Instance)> {
         let start = *self.preferred.lock().expect("preferred");
         let count = self.instances.len();
         (0..count)
@@ -120,7 +183,7 @@ impl Catalog {
             .collect()
     }
 
-    async fn fetch(&self, path: &str, min_version: Option<f32>) -> ApiResult<Arc<str>> {
+    async fn fetch(&self, path: &str, min_version: Option<ApiVersion>) -> ApiResult<Arc<str>> {
         if let Some(hit) = self.cache.lock().expect("cache").get(path) {
             return Ok(hit);
         }
@@ -174,7 +237,7 @@ impl Catalog {
     async fn fetch_json<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
-        min_version: Option<f32>,
+        min_version: Option<ApiVersion>,
     ) -> ApiResult<T> {
         let body = self.fetch(path, min_version).await?;
         serde_json::from_str(&body).map_err(|error| ApiError::Decode(error.to_string()))
@@ -320,7 +383,10 @@ impl Catalog {
 
     pub async fn recommendations(&self, track_id: u64) -> ApiResult<Vec<Track>> {
         let envelope: Envelope<Page<RecommendationItem>> = self
-            .fetch_json(&format!("/recommendations/?id={track_id}"), Some(2.4))
+            .fetch_json(
+                &format!("/recommendations/?id={track_id}"),
+                Some(RECOMMENDATIONS_SINCE),
+            )
             .await?;
         Ok(envelope
             .data
@@ -383,22 +449,25 @@ mod tests {
     #[test]
     fn instance_urls_lose_their_trailing_slash() {
         assert_eq!(
-            Instance::new("https://a.example/", 1.0).url,
+            Instance::new("https://a.example/", ApiVersion::new(1, 0)).url,
             "https://a.example"
         );
     }
 
     #[test]
     fn plaintext_instances_are_rejected() {
-        let error = Catalog::new(vec![Instance::new("http://insecure.example", 2.0)]);
+        let error = Catalog::new(vec![Instance::new(
+            "http://insecure.example",
+            ApiVersion::new(2, 0),
+        )]);
         assert!(matches!(error, Err(ApiError::NoInstances)));
     }
 
     #[test]
     fn plaintext_loopback_instances_are_allowed_for_self_hosting() {
-        assert!(Instance::new("http://127.0.0.1:8080", 2.0).is_secure());
-        assert!(Instance::new("http://localhost:8080", 2.0).is_secure());
-        assert!(!Instance::new("http://192.168.1.5:8080", 2.0).is_secure());
+        assert!(Instance::new("http://127.0.0.1:8080", ApiVersion::new(2, 0)).is_secure());
+        assert!(Instance::new("http://localhost:8080", ApiVersion::new(2, 0)).is_secure());
+        assert!(!Instance::new("http://192.168.1.5:8080", ApiVersion::new(2, 0)).is_secure());
     }
 
     #[test]
@@ -425,13 +494,75 @@ mod tests {
     #[test]
     fn version_filtering_excludes_older_instances() {
         let catalog = Catalog::new(vec![
-            Instance::new("https://old.example", 2.2),
-            Instance::new("https://new.example", 2.6),
+            Instance::new("https://old.example", ApiVersion::new(2, 2)),
+            Instance::new("https://new.example", ApiVersion::new(2, 6)),
         ])
         .expect("catalog");
-        let eligible = catalog.ordered(Some(2.4));
+        let eligible = catalog.ordered(Some(ApiVersion::new(2, 4)));
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].1.url, "https://new.example");
+    }
+
+    #[test]
+    fn a_tenth_release_counts_as_newer_than_a_fourth_not_older() {
+        assert!(ApiVersion::new(2, 10) > ApiVersion::new(2, 4));
+        assert!(ApiVersion::new(2, 10) > ApiVersion::new(2, 9));
+        assert!(ApiVersion::new(3, 0) > ApiVersion::new(2, 99));
+        assert_eq!(ApiVersion::new(2, 4), ApiVersion::new(2, 4));
+    }
+
+    #[test]
+    fn the_shipped_instance_can_serve_every_route_this_client_asks_for() {
+        let newest = DEFAULT_INSTANCES
+            .iter()
+            .map(|(_, version)| *version)
+            .max()
+            .expect("at least one instance ships");
+        assert!(
+            newest >= RECOMMENDATIONS_SINCE,
+            "nothing shipped can serve recommendations: {newest} < {RECOMMENDATIONS_SINCE}"
+        );
+    }
+
+    #[test]
+    fn a_version_the_service_reports_is_read_the_way_it_is_written() {
+        assert_eq!(ApiVersion::parse("2.10"), Some(ApiVersion::new(2, 10)));
+        assert_eq!(ApiVersion::parse(" 2.3 "), Some(ApiVersion::new(2, 3)));
+        assert_eq!(ApiVersion::parse("3"), Some(ApiVersion::new(3, 0)));
+        assert_eq!(ApiVersion::parse("2.10.1"), Some(ApiVersion::new(2, 10)));
+        assert_eq!(ApiVersion::parse("2.10-beta"), Some(ApiVersion::new(2, 10)));
+        assert_eq!(ApiVersion::parse("nonsense"), None);
+        assert_eq!(ApiVersion::parse(""), None);
+    }
+
+    #[test]
+    fn an_instance_is_read_however_it_chooses_to_report_itself() {
+        let plain = serde_json::json!({ "version": "2.3", "Repo": "https://example" });
+        assert_eq!(version_in(&plain), Some(ApiVersion::new(2, 3)));
+
+        let fronted = serde_json::json!({
+            "status": "operational",
+            "instances": [
+                { "name": "one", "version": "2.9", "ok": true },
+                { "name": "two", "version": "2.10", "ok": true }
+            ]
+        });
+        assert_eq!(
+            version_in(&fronted),
+            Some(ApiVersion::new(2, 10)),
+            "a front end is only as new as its newest instance"
+        );
+
+        assert_eq!(
+            version_in(&serde_json::json!({ "detail": "Not Found" })),
+            None
+        );
+    }
+
+    #[test]
+    fn a_version_reads_back_the_way_the_service_writes_it() {
+        assert_eq!(ApiVersion::new(2, 10).to_string(), "2.10");
+        assert_eq!(ApiVersion::new(2, 3).to_string(), "2.3");
     }
 
     #[test]
@@ -456,9 +587,9 @@ mod tests {
     #[test]
     fn failover_order_starts_from_the_preferred_instance() {
         let catalog = Catalog::new(vec![
-            Instance::new("https://a.example", 2.0),
-            Instance::new("https://b.example", 2.0),
-            Instance::new("https://c.example", 2.0),
+            Instance::new("https://a.example", ApiVersion::new(2, 0)),
+            Instance::new("https://b.example", ApiVersion::new(2, 0)),
+            Instance::new("https://c.example", ApiVersion::new(2, 0)),
         ])
         .expect("catalog");
         *catalog.preferred.lock().unwrap() = 1;

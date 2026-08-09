@@ -64,6 +64,22 @@ pub struct StreamHandle {
     pub source: Source,
     pub quality: Option<String>,
     pub decryption_key: Option<String>,
+    pub loudness: Option<Loudness>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Loudness {
+    pub gain_db: f32,
+    pub peak: Option<f32>,
+}
+
+impl StreamHandle {
+    pub fn levelling(&self, track: &Track) -> (Option<f32>, Option<f32>) {
+        match self.loudness {
+            Some(measured) => (Some(measured.gain_db), measured.peak.or(track.peak)),
+            None => (track.replay_gain, track.peak),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -131,6 +147,34 @@ struct PlaybackResource {
     decryption: Option<serde_json::Value>,
     #[serde(default)]
     drm: Option<serde_json::Value>,
+    #[serde(default, alias = "replayGain")]
+    replay_gain: Option<ReplayGain>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeezerHealth {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub accounts: DeezerAccounts,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DeezerAccounts {
+    #[serde(default)]
+    pub total: u32,
+    #[serde(default)]
+    pub available: u32,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ReplayGain {
+    #[serde(default, alias = "trackGainDb")]
+    track_gain_db: Option<f32>,
+    #[serde(default, alias = "trackPeak")]
+    track_peak: Option<f32>,
+    #[serde(default, alias = "programLoudnessLufs")]
+    program_loudness_lufs: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -457,7 +501,27 @@ impl StreamResolver {
                 .clone()
                 .or_else(|| envelope.quality_requested.clone()),
             decryption_key: decryption_key(resource),
+            loudness: loudness(resource.replay_gain.as_ref()),
         })
+    }
+
+    pub async fn deezer_health(&self) -> ApiResult<DeezerHealth> {
+        if !self.config.deezer_enabled {
+            return Err(ApiError::NoSourceEnabled);
+        }
+        let base = self.config.deezer_url.trim_end_matches('/');
+        let response = self.client.get(format!("{base}/")).send().await?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(ApiError::Status {
+                code: status.as_u16(),
+                message: gateway_message(&body).unwrap_or_else(|| "the service is unwell".into()),
+            });
+        }
+        let report: DeezerHealth =
+            serde_json::from_str(&body).map_err(|error| ApiError::Decode(error.to_string()))?;
+        Ok(report)
     }
 
     pub async fn playback_health(&self) -> ApiResult<()> {
@@ -602,6 +666,7 @@ impl StreamResolver {
             source: Source::Deezer,
             quality: Some(quality.as_deezer().to_string()),
             decryption_key: None,
+            loudness: None,
         })
     }
 }
@@ -639,6 +704,28 @@ fn playable(resource: &PlaybackResource) -> bool {
         && matches!(resource.kind.as_deref(), Some("audio") | Some("manifest"))
         && !url.contains(".mpd")
         && !url.contains(".m3u8")
+}
+
+const REFERENCE_LOUDNESS_LUFS: f32 = -18.0;
+
+fn loudness(measured: Option<&ReplayGain>) -> Option<Loudness> {
+    let measured = measured?;
+    let peak = measured
+        .track_peak
+        .filter(|peak| peak.is_finite() && *peak > 0.0);
+    if let Some(gain_db) = measured
+        .track_gain_db
+        .filter(|gain| gain.is_finite() && *gain != 0.0)
+    {
+        return Some(Loudness { gain_db, peak });
+    }
+    let program = measured
+        .program_loudness_lufs
+        .filter(|program| program.is_finite())?;
+    Some(Loudness {
+        gain_db: REFERENCE_LOUDNESS_LUFS - program,
+        peak,
+    })
 }
 
 fn decryption_key(resource: &PlaybackResource) -> Option<String> {
@@ -1037,6 +1124,90 @@ mod tests {
 
         let none = resource(r#"{"encryption":{"key":{"value":"  "}}}"#);
         assert_eq!(decryption_key(&none), None);
+    }
+
+    #[test]
+    fn a_measured_track_gain_is_used_as_it_stands() {
+        let measured = replay_gain(r#"{"track_gain_db":-7.5,"track_peak":0.98}"#);
+        let found = loudness(Some(&measured)).expect("measured");
+        assert_eq!(found.gain_db, -7.5);
+        assert_eq!(found.peak, Some(0.98));
+    }
+
+    #[test]
+    fn a_missing_track_gain_is_worked_out_from_the_measured_loudness() {
+        let measured = replay_gain(r#"{"program_loudness_lufs":-19.4}"#);
+        let found = loudness(Some(&measured)).expect("measured");
+        assert!(
+            (found.gain_db - 1.4).abs() < 0.001,
+            "-18 lufs is the reference, got {}",
+            found.gain_db
+        );
+        assert_eq!(found.peak, None);
+    }
+
+    #[test]
+    fn a_block_that_measured_nothing_leaves_the_stream_alone() {
+        assert_eq!(loudness(None), None);
+        let empty = replay_gain(r#"{"track_gain_db":null,"program_loudness_lufs":null}"#);
+        assert_eq!(loudness(Some(&empty)), None);
+        let zero = replay_gain(r#"{"track_gain_db":0.0}"#);
+        assert_eq!(
+            loudness(Some(&zero)),
+            None,
+            "0 dB means it was not measured"
+        );
+    }
+
+    #[test]
+    fn nonsense_numbers_are_refused_rather_than_multiplied_into_the_audio() {
+        let broken = ReplayGain {
+            track_gain_db: Some(f32::NAN),
+            track_peak: Some(0.0),
+            program_loudness_lufs: Some(f32::INFINITY),
+        };
+        assert_eq!(loudness(Some(&broken)), None);
+    }
+
+    #[test]
+    fn the_stream_that_plays_decides_its_own_level_before_the_catalogue_does() {
+        let mut track = track();
+        track.replay_gain = Some(-4.59);
+        track.peak = Some(0.9999);
+
+        let mut handle = handle();
+        assert_eq!(handle.levelling(&track), (Some(-4.59), Some(0.9999)));
+
+        handle.loudness = Some(Loudness {
+            gain_db: 1.4,
+            peak: None,
+        });
+        assert_eq!(
+            handle.levelling(&track),
+            (Some(1.4), Some(0.9999)),
+            "an unmeasured peak still borrows the catalogue's, so a boost cannot clip"
+        );
+
+        handle.loudness = Some(Loudness {
+            gain_db: 1.4,
+            peak: Some(0.8),
+        });
+        assert_eq!(handle.levelling(&track), (Some(1.4), Some(0.8)));
+    }
+
+    fn replay_gain(json: &str) -> ReplayGain {
+        serde_json::from_str(json).expect("replay gain")
+    }
+
+    fn handle() -> StreamHandle {
+        StreamHandle {
+            url: "https://cdn.example/a.flac".into(),
+            headers: Vec::new(),
+            source: Source::Monochrome,
+            quality: None,
+            decryption_key: None,
+            loudness: None,
+        }
     }
 
     #[test]

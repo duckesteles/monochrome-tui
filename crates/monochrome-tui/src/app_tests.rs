@@ -477,6 +477,70 @@ fn queueing_a_track_appends_without_disturbing_playback() {
 }
 
 #[test]
+fn a_radio_is_built_from_the_highlighted_track() {
+    let mut app = app();
+    app.push(Screen::Album(album(1, vec![track(1), track(2)])));
+    app.cursor_to_start();
+
+    let effects = app.start_radio();
+    assert!(
+        matches!(effects.as_slice(), [Effect::Radio(1)]),
+        "{effects:?}"
+    );
+    assert_eq!(
+        app.status.as_deref(),
+        Some("looking for tracks like Song 1")
+    );
+
+    app.apply(Message::Radio(vec![track(8), track(9)]));
+    assert_eq!(app.queue.len(), 2);
+    assert_eq!(app.status.as_deref(), Some("queued 2 tracks like Song 1"));
+}
+
+#[test]
+fn a_radio_falls_back_to_what_is_playing_when_nothing_is_highlighted() {
+    let mut app = app();
+    app.now.track = Some(track(4));
+    let effects = app.start_radio();
+    assert!(
+        matches!(effects.as_slice(), [Effect::Radio(4)]),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn a_radio_with_no_track_to_grow_from_says_so_instead_of_asking() {
+    let mut app = app();
+    assert!(app.start_radio().is_empty());
+    assert_eq!(
+        app.status.as_deref(),
+        Some("highlight a track to build a radio from")
+    );
+}
+
+#[test]
+fn a_radio_never_queues_a_track_the_queue_already_holds() {
+    let mut app = app();
+    app.push(Screen::Album(album(1, vec![track(1), track(2)])));
+    app.cursor_to_start();
+    app.open_selected();
+    assert_eq!(app.queue.len(), 2);
+
+    app.start_radio();
+    app.apply(Message::Radio(vec![track(2), track(3)]));
+    assert_eq!(app.queue.len(), 3, "song 2 was already queued");
+    assert_eq!(app.status.as_deref(), Some("queued 1 track like Song 1"));
+
+    app.start_radio();
+    app.apply(Message::Radio(vec![track(3)]));
+    assert_eq!(app.queue.len(), 3);
+    assert_eq!(
+        app.status.as_deref(),
+        Some("nothing new like Song 1 to queue")
+    );
+}
+
+#[test]
 fn help_toggles_and_clears_any_status_message() {
     let mut app = app();
     app.status = Some("saved something".into());

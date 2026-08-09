@@ -10,7 +10,6 @@ pub struct Config {
     pub catalog: CatalogConfig,
     pub playback: PlaybackConfig,
     pub playback_service: PlaybackServiceConfig,
-    pub amazon: AmazonConfig,
     pub deezer: DeezerConfig,
     pub ui: UiConfig,
 }
@@ -42,13 +41,6 @@ pub struct PlaybackServiceConfig {
     pub token: String,
     pub turnstile_site_key: String,
     pub turnstile_action: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AmazonConfig {
-    pub bypass_token: String,
-    pub api_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,8 +149,26 @@ impl Config {
 
     pub fn playback_token(&self) -> Option<String> {
         non_empty(&self.playback_service.token)
-            .or_else(|| non_empty(&self.amazon.bypass_token))
-            .or_else(|| non_empty(&self.amazon.api_key))
+    }
+
+    fn settle(&mut self) {
+        use monochrome_api::catalog::{DEFAULT_INSTANCES, is_default, is_retired};
+
+        self.playback_service.url = self.playback_url();
+        self.playback_service.token = self.playback_token().unwrap_or_default();
+
+        let configured = &mut self.catalog.instances;
+        let nothing_hand_picked = configured
+            .iter()
+            .all(|url| is_default(url) || is_retired(url));
+        if nothing_hand_picked {
+            *configured = DEFAULT_INSTANCES
+                .iter()
+                .map(|(url, _)| (*url).to_string())
+                .collect();
+        } else {
+            configured.retain(|url| !is_retired(url));
+        }
     }
 
     pub fn stream_config(&self) -> monochrome_api::StreamConfig {
@@ -188,15 +198,21 @@ impl Config {
                 .collect();
         }
 
-        let known: std::collections::HashMap<&str, f32> = DEFAULT_INSTANCES
+        let newest = DEFAULT_INSTANCES
             .iter()
-            .map(|(url, version)| (*url, *version))
-            .collect();
+            .map(|(_, version)| *version)
+            .max()
+            .unwrap_or(monochrome_api::catalog::ApiVersion::new(2, 10));
+        let known: std::collections::HashMap<&str, monochrome_api::catalog::ApiVersion> =
+            DEFAULT_INSTANCES
+                .iter()
+                .map(|(url, version)| (*url, *version))
+                .collect();
         configured
             .iter()
             .filter(|url| !is_retired(url))
             .map(|url| {
-                let version = known.get(url.as_str()).copied().unwrap_or(2.10);
+                let version = known.get(url.as_str()).copied().unwrap_or(newest);
                 monochrome_api::Instance::new(url.clone(), version)
             })
             .collect()
@@ -208,7 +224,15 @@ impl Config {
         }
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;
-        toml::from_str(&raw).with_context(|| format!("cannot parse {}", path.display()))
+        let mut config: Self =
+            toml::from_str(&raw).with_context(|| format!("cannot parse {}", path.display()))?;
+        if config.playback_service.token.trim().is_empty()
+            && let Some(carried) = token_left_in_a_retired_section(&raw)
+        {
+            config.playback_service.token = carried;
+        }
+        config.settle();
+        Ok(config)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -222,6 +246,15 @@ impl Config {
 
 fn non_empty(value: &str) -> Option<String> {
     (!value.trim().is_empty()).then(|| value.trim().to_string())
+}
+
+fn token_left_in_a_retired_section(raw: &str) -> Option<String> {
+    let parsed: toml::Table = toml::from_str(raw).ok()?;
+    let amazon = parsed.get("amazon")?;
+    ["bypass_token", "api_key"]
+        .into_iter()
+        .filter_map(|key| amazon.get(key).and_then(toml::Value::as_str))
+        .find_map(non_empty)
 }
 
 #[derive(Debug, Clone)]
@@ -337,31 +370,18 @@ mod tests {
     #[test]
     fn blank_credentials_are_treated_as_absent() {
         let mut config = Config::default();
-        config.amazon.bypass_token = "   ".into();
+        config.playback_service.token = "   ".into();
         assert!(config.stream_config().playback_token.is_none());
     }
 
     #[test]
     fn credentials_are_trimmed() {
         let mut config = Config::default();
-        config.amazon.api_key = "  key  ".into();
+        config.playback_service.token = "  key  ".into();
         assert_eq!(
             config.stream_config().playback_token.as_deref(),
             Some("key")
         );
-    }
-
-    #[test]
-    fn a_token_saved_under_the_old_amazon_keys_is_carried_forward() {
-        let mut config = Config::default();
-        config.amazon.bypass_token = "from-the-old-config".into();
-        assert_eq!(
-            config.playback_token().as_deref(),
-            Some("from-the-old-config")
-        );
-
-        config.playback_service.token = "the-new-home".into();
-        assert_eq!(config.playback_token().as_deref(), Some("the-new-home"));
     }
 
     #[test]
@@ -377,17 +397,24 @@ mod tests {
         let path = scratch.file("config.toml");
         let mut config = Config::default();
         config.playback.volume = 0.42;
-        config.amazon.bypass_token = "abc".into();
+        config.playback_service.token = "abc".into();
         config.save(&path).expect("save");
 
         let loaded = Config::load(&path).expect("load");
         assert_eq!(loaded.playback.volume, 0.42);
-        assert_eq!(loaded.amazon.bypass_token, "abc");
+        assert_eq!(loaded.playback_service.token, "abc");
     }
 
-    #[test]
-    fn a_config_written_by_an_older_build_still_loads_and_is_brought_up_to_date() {
-        let older = r#"
+    const WRITTEN_BY_AN_OLDER_BUILD: &str = r#"
+[catalog]
+instances = [
+    "https://eu-central.monochrome.tf",
+    "https://us-west.monochrome.tf",
+    "https://api.monochrome.tf",
+    "https://hifi.geeked.wtf",
+    "https://monochrome-api.samidy.com",
+]
+
 [playback_service]
 enabled = true
 url = "https://track-api.monochrome.tf"
@@ -401,8 +428,16 @@ bypass_token = "kept"
 api_key = ""
 turnstile_site_key = "0x4AAAAAADgxqF6QVMm0GLHH"
 "#;
-        let parsed: Config = toml::from_str(older).expect("an older config must still parse");
-        let stream = parsed.stream_config();
+
+    #[test]
+    fn a_config_written_by_an_older_build_is_brought_up_to_date_when_it_is_read() {
+        let scratch = Scratch::new("older");
+        let path = scratch.file("config.toml");
+        std::fs::create_dir_all(scratch.dir()).expect("create");
+        std::fs::write(&path, WRITTEN_BY_AN_OLDER_BUILD).expect("write");
+
+        let loaded = Config::load(&path).expect("an older config must still load");
+        let stream = loaded.stream_config();
         assert_eq!(
             stream.playback_url,
             monochrome_api::stream::DEFAULT_PLAYBACK_URL
@@ -410,6 +445,31 @@ turnstile_site_key = "0x4AAAAAADgxqF6QVMm0GLHH"
         assert_eq!(stream.playback_token.as_deref(), Some("kept"));
         assert!(stream.playback_enabled);
         assert_eq!(stream.turnstile_action, "auth");
+    }
+
+    #[test]
+    fn what_is_written_back_says_where_the_program_really_goes() {
+        let scratch = Scratch::new("honest");
+        let path = scratch.file("config.toml");
+        std::fs::create_dir_all(scratch.dir()).expect("create");
+        std::fs::write(&path, WRITTEN_BY_AN_OLDER_BUILD).expect("write");
+
+        let loaded = Config::load(&path).expect("load");
+        loaded.save(&path).expect("save");
+        let written = std::fs::read_to_string(&path).expect("read back");
+
+        assert!(
+            !written.contains("track-api.monochrome.tf"),
+            "the file still names a host nothing talks to:\n{written}"
+        );
+        assert!(!written.contains("[amazon]"), "{written}");
+        assert!(!written.contains("hifi.geeked.wtf"), "{written}");
+        assert!(written.contains(monochrome_api::stream::DEFAULT_PLAYBACK_URL));
+        assert!(written.contains("kept"));
+
+        let again = Config::load(&path).expect("reload");
+        assert_eq!(again.playback_token().as_deref(), Some("kept"));
+        assert_eq!(again.instances().len(), loaded.instances().len());
     }
 
     #[test]

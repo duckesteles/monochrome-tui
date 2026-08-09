@@ -368,6 +368,23 @@ fn perform(
                 }
             });
         }
+        Effect::Radio(track_id) => {
+            let services = services.clone();
+            let messages = messages.clone();
+            tokio::spawn(async move {
+                match services.catalog.recommendations(track_id).await {
+                    Ok(tracks) if tracks.is_empty() => {
+                        let _ = messages.send(Message::Notice(
+                            "the catalogue knows nothing like that track".into(),
+                        ));
+                    }
+                    Ok(tracks) => {
+                        let _ = messages.send(Message::Radio(tracks));
+                    }
+                    Err(error) => report(&messages, error),
+                }
+            });
+        }
         Effect::LoadPlaylist(uuid) => {
             let services = services.clone();
             let messages = messages.clone();
@@ -441,11 +458,12 @@ fn start_playback(
                 let _ = messages.send(Message::StreamReady {
                     source: handle.source.label().to_string(),
                 });
+                let (replay_gain, peak) = handle.levelling(&track);
                 player.play(PlayRequest {
                     url: handle.url,
                     headers: handle.headers,
-                    replay_gain: track.replay_gain,
-                    peak: track.peak,
+                    replay_gain,
+                    peak,
                     decryption_key: handle.decryption_key,
                 });
             }
