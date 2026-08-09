@@ -21,13 +21,8 @@ impl Quality {
         }
     }
 
-    pub fn as_amazon(self) -> &'static str {
-        match self {
-            Quality::Low => "SD_LOW",
-            Quality::High => "SD_HIGH",
-            Quality::Lossless => "HD",
-            Quality::HiRes | Quality::Atmos => "UHD",
-        }
+    pub fn as_unified(self) -> &'static str {
+        self.as_tidal()
     }
 
     pub fn as_deezer(self) -> &'static str {

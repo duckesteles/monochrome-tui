@@ -292,37 +292,54 @@ fn sample_track() -> Track {
 fn playback_resolver(server: &MockServer) -> StreamResolver {
     let mut config = StreamConfig::with_defaults();
     config.playback_url = server.uri();
-    config.amazon_enabled = false;
     config.deezer_enabled = false;
     StreamResolver::new(config).expect("resolver")
 }
 
-fn resolver_for(server: &MockServer, bypass: Option<&str>) -> StreamResolver {
-    let mut config = StreamConfig::with_defaults();
-    config.playback_enabled = false;
-    config.amazon_url = server.uri();
-    config.deezer_url = server.uri();
-    config.amazon_bypass_token = bypass.map(str::to_string);
-    StreamResolver::new(config).expect("resolver")
+fn envelope(resources: serde_json::Value) -> serde_json::Value {
+    json!({
+        "schema_version": "2.0",
+        "request_id": "r1",
+        "intent": "stream",
+        "quality_requested": "LOSSLESS",
+        "selected_source": "mono",
+        "track": { "id": "t1", "duration_ms": 320_000 },
+        "playback": resources,
+    })
 }
 
 #[tokio::test]
-async fn an_amazon_lookup_returns_the_cdn_address_and_its_key() {
+async fn a_playback_lookup_returns_the_cdn_address_and_its_key() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/api/track/"))
-        .and(query_param("bypass_token", "secret"))
-        .and(query_param("quality", "HD"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "asin": "B0DXYZ1234",
-            "quality_selected": "HD_44",
-            "stream_url": "https://cdn.example/audio.mp4",
-            "decryption_key": "00112233445566778899aabbccddeeff"
-        })))
+        .and(path("/api/v2/track/"))
+        .and(query_param("track", "One More Time"))
+        .and(query_param("artist", "Daft Punk"))
+        .and(query_param("isrc", "GBDUW0000053"))
+        .and(query_param("duration", "320"))
+        .and(query_param("intent", "stream"))
+        .and(query_param("quality", "LOSSLESS"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer a-session-token",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([{
+            "kind": "audio",
+            "delivery": "direct",
+            "source": "amazon",
+            "quality": "HI_RES_LOSSLESS",
+            "url": "https://cdn.example/audio.mp4",
+            "encryption": { "key": { "value": "00112233445566778899aabbccddeeff" } }
+        }]))))
         .mount(&server)
         .await;
 
-    let resolver = resolver_for(&server, Some("secret"));
+    let mut config = StreamConfig::with_defaults();
+    config.playback_url = server.uri();
+    config.playback_token = Some("a-session-token".into());
+    config.deezer_enabled = false;
+    let resolver = StreamResolver::new(config).expect("resolver");
+
     let handle = resolver
         .resolve(&sample_track(), Quality::Lossless)
         .await
@@ -333,7 +350,7 @@ async fn an_amazon_lookup_returns_the_cdn_address_and_its_key() {
         handle.decryption_key.as_deref(),
         Some("00112233445566778899aabbccddeeff")
     );
-    assert_eq!(handle.quality.as_deref(), Some("HD_44"));
+    assert_eq!(handle.quality.as_deref(), Some("HI_RES_LOSSLESS"));
     assert_eq!(handle.source.label(), "amazon");
     assert!(
         handle.headers.is_empty(),
@@ -342,49 +359,109 @@ async fn an_amazon_lookup_returns_the_cdn_address_and_its_key() {
 }
 
 #[tokio::test]
-async fn a_lookup_without_a_stream_address_is_an_error_not_a_silent_failure() {
+async fn an_isrc_is_sent_in_the_upper_case_the_service_expects() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/api/track/"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "asin": "B0DXYZ1234",
-            "quality_selected": "HD"
-        })))
+        .and(path("/api/v2/track/"))
+        .and(query_param("isrc", "GBDUW0000053"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([{
+            "kind": "audio",
+            "delivery": "direct",
+            "url": "https://cdn.example/track.flac"
+        }]))))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let resolver = playback_resolver(&server);
+    resolver.cache_jwt("a-session".into());
+    let mut track = sample_track();
+    track.isrc = Some("gbduw0000053".into());
+    resolver
+        .resolve(&track, Quality::Lossless)
+        .await
+        .expect("resolved");
+}
+
+#[tokio::test]
+async fn a_manifest_this_player_cannot_read_is_passed_over() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([
+            {
+                "kind": "manifest",
+                "delivery": "dash",
+                "source": "amazon",
+                "url": "https://cdn.example/stream.mpd"
+            },
+            {
+                "kind": "audio",
+                "delivery": "direct",
+                "source": "mono",
+                "url": "https://cdn.example/track.flac"
+            }
+        ]))))
+        .mount(&server)
+        .await;
+
+    let resolver = playback_resolver(&server);
+    resolver.cache_jwt("a-session".into());
+    let handle = resolver
+        .resolve(&sample_track(), Quality::Lossless)
+        .await
+        .expect("resolved");
+
+    assert_eq!(handle.url, "https://cdn.example/track.flac");
+    assert_eq!(handle.source.label(), "monochrome");
+}
+
+#[tokio::test]
+async fn an_envelope_with_nothing_this_player_can_read_defers_to_the_next_source() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([{
+            "kind": "manifest",
+            "delivery": "hls",
+            "url": "https://cdn.example/stream.m3u8"
+        }]))))
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path("/stream/"))
+        .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
 
     let mut config = StreamConfig::with_defaults();
-    config.playback_enabled = false;
-    config.amazon_url = server.uri();
-    config.amazon_bypass_token = Some("secret".into());
-    config.deezer_enabled = false;
+    config.playback_url = server.uri();
+    config.deezer_url = server.uri();
     let resolver = StreamResolver::new(config).expect("resolver");
+    resolver.cache_jwt("a-session".into());
 
-    let error = resolver
+    let handle = resolver
         .resolve(&sample_track(), Quality::Lossless)
         .await
-        .expect_err("no address means no playback");
-    assert!(error.to_string().contains("no stream address"));
+        .expect("deezer takes over");
+    assert_eq!(handle.source.label(), "deezer");
 }
 
 #[tokio::test]
 async fn a_plaintext_stream_address_is_refused() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/api/track/"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "asin": "B0DXYZ1234",
-            "stream_url": "http://cdn.example/audio.mp4"
-        })))
+        .and(path("/api/v2/track/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([{
+            "kind": "audio",
+            "delivery": "direct",
+            "url": "http://cdn.example/audio.mp4"
+        }]))))
         .mount(&server)
         .await;
 
-    let mut config = StreamConfig::with_defaults();
-    config.amazon_url = server.uri();
-    config.amazon_bypass_token = Some("secret".into());
-    config.deezer_enabled = false;
-    let resolver = StreamResolver::new(config).expect("resolver");
-
+    let resolver = playback_resolver(&server);
+    resolver.cache_jwt("a-session".into());
     assert!(
         resolver
             .resolve(&sample_track(), Quality::Lossless)
@@ -394,10 +471,35 @@ async fn a_plaintext_stream_address_is_refused() {
 }
 
 #[tokio::test]
+async fn a_schema_this_build_does_not_know_is_reported_rather_than_guessed_at() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "schema_version": "3.0",
+            "playback": [{
+                "kind": "audio",
+                "delivery": "direct",
+                "url": "https://cdn.example/track.flac"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let resolver = playback_resolver(&server);
+    resolver.cache_jwt("a-session".into());
+    let error = resolver
+        .resolve(&sample_track(), Quality::Lossless)
+        .await
+        .expect_err("an unknown schema is not guessed at");
+    assert!(error.to_string().contains("schema 3.0"), "{error}");
+}
+
+#[tokio::test]
 async fn a_rejected_token_is_discarded_and_reported_as_such() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/api/track/"))
+        .and(path("/api/v2/track/"))
         .respond_with(ResponseTemplate::new(401).set_body_json(json!({
             "detail": "Invalid Turnstile JWT."
         })))
@@ -405,9 +507,8 @@ async fn a_rejected_token_is_discarded_and_reported_as_such() {
         .await;
 
     let mut config = StreamConfig::with_defaults();
-    config.playback_enabled = false;
-    config.amazon_url = server.uri();
-    config.amazon_bypass_token = Some("secret".into());
+    config.playback_url = server.uri();
+    config.playback_token = Some("secret".into());
     config.deezer_enabled = false;
     let resolver = StreamResolver::new(config).expect("resolver");
 
@@ -419,10 +520,35 @@ async fn a_rejected_token_is_discarded_and_reported_as_such() {
 }
 
 #[tokio::test]
+async fn a_blocked_address_is_named_as_such_rather_than_blamed_on_the_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+
+    let resolver = playback_resolver(&server);
+    resolver.cache_jwt("a-session".into());
+    let error = resolver
+        .resolve(&sample_track(), Quality::Lossless)
+        .await
+        .expect_err("blocked");
+    assert!(
+        error.to_string().contains("blocked this address"),
+        "{error}"
+    );
+    assert!(
+        resolver.has_session(),
+        "a block is not the session's fault and must not discard it"
+    );
+}
+
+#[tokio::test]
 async fn a_428_means_no_credential_was_sent_and_does_not_discard_a_good_one() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/api/track/"))
+        .and(path("/api/v2/track/"))
         .respond_with(ResponseTemplate::new(428).set_body_json(json!({
             "error": "turnstile_required"
         })))
@@ -430,9 +556,8 @@ async fn a_428_means_no_credential_was_sent_and_does_not_discard_a_good_one() {
         .await;
 
     let mut config = StreamConfig::with_defaults();
-    config.playback_enabled = false;
-    config.amazon_url = server.uri();
-    config.amazon_bypass_token = Some("secret".into());
+    config.playback_url = server.uri();
+    config.playback_token = Some("secret".into());
     config.deezer_enabled = false;
     let resolver = StreamResolver::new(config).expect("resolver");
     resolver.cache_jwt("good-session".into());
@@ -444,7 +569,7 @@ async fn a_428_means_no_credential_was_sent_and_does_not_discard_a_good_one() {
     assert!(matches!(error, ApiError::TurnstileRequired));
     assert!(
         resolver.has_session(),
-        "a 428 from amazon must not throw away a working session"
+        "a 428 must not throw away a working session"
     );
 }
 
@@ -452,14 +577,12 @@ async fn a_428_means_no_credential_was_sent_and_does_not_discard_a_good_one() {
 async fn validating_a_good_token_succeeds() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/api/track/"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "asin": "B0DXYZ1234" })))
+        .and(path("/api/v2/track/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([]))))
         .mount(&server)
         .await;
 
-    let mut config = StreamConfig::with_defaults();
-    config.amazon_url = server.uri();
-    let resolver = StreamResolver::new(config).expect("resolver");
+    let resolver = playback_resolver(&server);
     resolver.cache_jwt("fresh-jwt".into());
     resolver
         .validate_credential()
@@ -471,14 +594,12 @@ async fn validating_a_good_token_succeeds() {
 async fn validating_a_bad_token_reports_it_before_playback_is_attempted() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/api/track/"))
+        .and(path("/api/v2/track/"))
         .respond_with(ResponseTemplate::new(401))
         .mount(&server)
         .await;
 
-    let mut config = StreamConfig::with_defaults();
-    config.amazon_url = server.uri();
-    let resolver = StreamResolver::new(config).expect("resolver");
+    let resolver = playback_resolver(&server);
     resolver.cache_jwt("bad-jwt".into());
 
     let error = resolver
@@ -486,13 +607,13 @@ async fn validating_a_bad_token_reports_it_before_playback_is_attempted() {
         .await
         .expect_err("the token should be refused");
     assert!(matches!(error, ApiError::CredentialRejected));
-    assert!(!resolver.has_amazon_credential());
+    assert!(!resolver.has_playback_credential());
 }
 
 #[tokio::test]
 async fn validating_without_any_credential_asks_for_verification() {
     let mut config = StreamConfig::with_defaults();
-    config.amazon_url = "https://amazon.invalid".into();
+    config.playback_url = "https://playback.invalid".into();
     let resolver = StreamResolver::new(config).expect("resolver");
     let error = resolver
         .validate_credential()
@@ -502,7 +623,7 @@ async fn validating_without_any_credential_asks_for_verification() {
 }
 
 #[tokio::test]
-async fn deezer_takes_over_when_amazon_has_no_credential() {
+async fn deezer_takes_over_when_playback_has_no_credential() {
     let server = MockServer::start().await;
     Mock::given(method("HEAD"))
         .and(path("/stream/"))
@@ -514,7 +635,6 @@ async fn deezer_takes_over_when_amazon_has_no_credential() {
 
     let mut config = StreamConfig::with_defaults();
     config.playback_enabled = false;
-    config.amazon_enabled = false;
     config.deezer_url = server.uri();
     let resolver = StreamResolver::new(config).expect("resolver");
 
@@ -540,7 +660,6 @@ async fn a_dead_deezer_gateway_is_reported() {
 
     let mut config = StreamConfig::with_defaults();
     config.playback_enabled = false;
-    config.amazon_enabled = false;
     config.deezer_url = server.uri();
     let resolver = StreamResolver::new(config).expect("resolver");
 
@@ -555,7 +674,7 @@ async fn a_dead_deezer_gateway_is_reported() {
 async fn exchanging_a_challenge_token_caches_the_jwt() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/auth/turnstile"))
+        .and(path("/api/auth/turnstile"))
         .and(wiremock::matchers::body_json(
             json!({ "turnstile_token": "cf-token" }),
         ))
@@ -577,27 +696,31 @@ async fn exchanging_a_challenge_token_caches_the_jwt() {
 }
 
 #[tokio::test]
-async fn the_playback_service_answers_with_a_direct_address() {
+async fn an_exchange_that_hands_back_nothing_is_not_stored_as_a_session() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/playback"))
-        .and(wiremock::matchers::header(
-            "authorization",
-            "Bearer a-session",
-        ))
-        .and(wiremock::matchers::body_json(json!({
-            "song_name": "One More Time",
-            "artist": "Daft Punk",
-            "isrc": "GBDUW0000053",
-            "duration": 320
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "url": "https://cdn.example/track.flac",
-            "track_id": "t1",
-            "recording_id": "r1",
-            "title": "One More Time",
-            "artists": ["Daft Punk"]
-        })))
+        .and(path("/api/auth/turnstile"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "access_token": "  " })))
+        .mount(&server)
+        .await;
+
+    let resolver = playback_resolver(&server);
+    assert!(resolver.finish_verification("cf-token").await.is_err());
+    assert!(!resolver.has_session());
+}
+
+#[tokio::test]
+async fn the_playback_service_answers_with_a_direct_address() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
+        .and(wiremock::matchers::header("x-turnstile-jwt", "a-session"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([{
+            "kind": "audio",
+            "delivery": "direct",
+            "source": "mono",
+            "url": "https://cdn.example/track.flac"
+        }]))))
         .mount(&server)
         .await;
 
@@ -610,6 +733,7 @@ async fn the_playback_service_answers_with_a_direct_address() {
 
     assert_eq!(handle.url, "https://cdn.example/track.flac");
     assert_eq!(handle.source.label(), "monochrome");
+    assert_eq!(handle.quality.as_deref(), Some("LOSSLESS"));
     assert!(
         handle.decryption_key.is_none(),
         "the playback service serves plain flac"
@@ -619,8 +743,8 @@ async fn the_playback_service_answers_with_a_direct_address() {
 #[tokio::test]
 async fn a_playback_session_that_is_refused_asks_for_the_browser_check_again() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/playback"))
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
         .respond_with(ResponseTemplate::new(401))
         .mount(&server)
         .await;
@@ -653,8 +777,8 @@ async fn without_a_session_the_playback_service_is_not_even_asked() {
 #[tokio::test]
 async fn being_rate_limited_is_reported_in_plain_words() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/playback"))
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
         .respond_with(ResponseTemplate::new(429))
         .mount(&server)
         .await;
