@@ -39,18 +39,16 @@ pub struct PlaybackConfig {
 pub struct PlaybackServiceConfig {
     pub enabled: bool,
     pub url: String,
+    pub token: String,
     pub turnstile_site_key: String,
     pub turnstile_action: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AmazonConfig {
-    pub enabled: bool,
-    pub url: String,
     pub bypass_token: String,
     pub api_key: String,
-    pub turnstile_site_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,23 +102,12 @@ impl Default for PlaybackConfig {
     }
 }
 
-impl Default for AmazonConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            url: monochrome_api::stream::DEFAULT_AMAZON_URL.into(),
-            bypass_token: String::new(),
-            api_key: String::new(),
-            turnstile_site_key: monochrome_api::turnstile::DEFAULT_SITE_KEY.into(),
-        }
-    }
-}
-
 impl Default for PlaybackServiceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             url: monochrome_api::stream::DEFAULT_PLAYBACK_URL.into(),
+            token: String::new(),
             turnstile_site_key: monochrome_api::turnstile::DEFAULT_SITE_KEY.into(),
             turnstile_action: monochrome_api::turnstile::DEFAULT_ACTION.into(),
         }
@@ -158,14 +145,27 @@ impl Config {
         self.playback.volume.clamp(0.0, 1.0)
     }
 
+    pub fn playback_url(&self) -> String {
+        use monochrome_api::stream::{DEFAULT_PLAYBACK_URL, is_retired_playback_url};
+
+        let configured = self.playback_service.url.trim();
+        if configured.is_empty() || is_retired_playback_url(configured) {
+            return DEFAULT_PLAYBACK_URL.into();
+        }
+        configured.to_string()
+    }
+
+    pub fn playback_token(&self) -> Option<String> {
+        non_empty(&self.playback_service.token)
+            .or_else(|| non_empty(&self.amazon.bypass_token))
+            .or_else(|| non_empty(&self.amazon.api_key))
+    }
+
     pub fn stream_config(&self) -> monochrome_api::StreamConfig {
         monochrome_api::StreamConfig {
             playback_enabled: self.playback_service.enabled,
-            playback_url: self.playback_service.url.clone(),
-            amazon_enabled: self.amazon.enabled,
-            amazon_url: self.amazon.url.clone(),
-            amazon_bypass_token: non_empty(&self.amazon.bypass_token),
-            amazon_api_key: non_empty(&self.amazon.api_key),
+            playback_url: self.playback_url(),
+            playback_token: self.playback_token(),
             turnstile_site_key: self.playback_service.turnstile_site_key.clone(),
             turnstile_action: self.playback_service.turnstile_action.clone(),
             deezer_enabled: self.deezer.enabled,
@@ -264,8 +264,32 @@ mod tests {
                 .iter()
                 .all(|url| url.starts_with("https://"))
         );
-        assert!(config.amazon.enabled);
+        assert!(config.playback_service.enabled);
         assert!(config.deezer.enabled);
+        assert_eq!(
+            config.playback_url(),
+            monochrome_api::stream::DEFAULT_PLAYBACK_URL
+        );
+    }
+
+    #[test]
+    fn a_config_frozen_on_a_retired_playback_host_is_moved_to_the_current_one() {
+        let mut config = Config::default();
+        for retired in monochrome_api::stream::RETIRED_PLAYBACK_URLS {
+            config.playback_service.url = (*retired).into();
+            assert_eq!(
+                config.playback_url(),
+                monochrome_api::stream::DEFAULT_PLAYBACK_URL,
+                "{retired} is no longer served"
+            );
+        }
+    }
+
+    #[test]
+    fn a_playback_host_you_chose_yourself_is_left_alone() {
+        let mut config = Config::default();
+        config.playback_service.url = "https://my-own-mirror.example".into();
+        assert_eq!(config.playback_url(), "https://my-own-mirror.example");
     }
 
     #[test]
@@ -314,9 +338,7 @@ mod tests {
     fn blank_credentials_are_treated_as_absent() {
         let mut config = Config::default();
         config.amazon.bypass_token = "   ".into();
-        let stream = config.stream_config();
-        assert!(stream.amazon_bypass_token.is_none());
-        assert!(stream.amazon_api_key.is_none());
+        assert!(config.stream_config().playback_token.is_none());
     }
 
     #[test]
@@ -324,9 +346,22 @@ mod tests {
         let mut config = Config::default();
         config.amazon.api_key = "  key  ".into();
         assert_eq!(
-            config.stream_config().amazon_api_key.as_deref(),
+            config.stream_config().playback_token.as_deref(),
             Some("key")
         );
+    }
+
+    #[test]
+    fn a_token_saved_under_the_old_amazon_keys_is_carried_forward() {
+        let mut config = Config::default();
+        config.amazon.bypass_token = "from-the-old-config".into();
+        assert_eq!(
+            config.playback_token().as_deref(),
+            Some("from-the-old-config")
+        );
+
+        config.playback_service.token = "the-new-home".into();
+        assert_eq!(config.playback_token().as_deref(), Some("the-new-home"));
     }
 
     #[test]
@@ -348,6 +383,33 @@ mod tests {
         let loaded = Config::load(&path).expect("load");
         assert_eq!(loaded.playback.volume, 0.42);
         assert_eq!(loaded.amazon.bypass_token, "abc");
+    }
+
+    #[test]
+    fn a_config_written_by_an_older_build_still_loads_and_is_brought_up_to_date() {
+        let older = r#"
+[playback_service]
+enabled = true
+url = "https://track-api.monochrome.tf"
+turnstile_site_key = "0x4AAAAAADgxqF6QVMm0GLHH"
+turnstile_action = "auth"
+
+[amazon]
+enabled = true
+url = "https://amz.geeked.wtf"
+bypass_token = "kept"
+api_key = ""
+turnstile_site_key = "0x4AAAAAADgxqF6QVMm0GLHH"
+"#;
+        let parsed: Config = toml::from_str(older).expect("an older config must still parse");
+        let stream = parsed.stream_config();
+        assert_eq!(
+            stream.playback_url,
+            monochrome_api::stream::DEFAULT_PLAYBACK_URL
+        );
+        assert_eq!(stream.playback_token.as_deref(), Some("kept"));
+        assert!(stream.playback_enabled);
+        assert_eq!(stream.turnstile_action, "auth");
     }
 
     #[test]

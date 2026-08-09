@@ -89,7 +89,7 @@ pub async fn doctor(paths: Paths) -> Result<()> {
         }
     );
 
-    if resolver.has_static_amazon_credential() {
+    if resolver.has_playback_credential() {
         let seen = resolver.gateway_client_ip().await;
         let issued_for = secrets
             .get(PLAYBACK_SESSION)
@@ -98,16 +98,16 @@ pub async fn doctor(paths: Paths) -> Result<()> {
             .unwrap_or_default();
         println!("gateway   {}", describe_address(seen, &issued_for));
         match resolver.validate_credential().await {
-            Ok(()) => println!("amazon    credential present and accepted"),
+            Ok(()) => println!("token     present and accepted"),
             Err(ApiError::CredentialRejected) => {
-                println!("amazon    credential present but REJECTED, verify again")
+                println!("token     present but REJECTED, verify again")
             }
             Err(ApiError::Status { code, message }) if code >= 500 => println!(
-                "amazon    credential accepted, but the gateway itself failed: {code} {}",
+                "token     accepted, but the gateway itself failed: {code} {}",
                 secrets::redact(&message)
             ),
             Err(error) => println!(
-                "amazon    credential present, check failed: {}",
+                "token     present, check failed: {}",
                 secrets::redact(&error.to_string())
             ),
         }
@@ -154,8 +154,8 @@ pub async fn probe(paths: Paths, query: String) -> Result<()> {
         Err(error) => println!("playback  FAILED: {}", secrets::redact(&error.to_string())),
     }
 
-    if resolver.has_static_amazon_credential() {
-        let looked_up = resolver.amazon_lookup(&track, config.quality()).await;
+    if resolver.has_playback_credential() {
+        let looked_up = resolver.playback_lookup(&track, config.quality()).await;
         match &looked_up {
             Ok(payload) => {
                 println!("lookup    the gateway answered with:");
@@ -167,10 +167,7 @@ pub async fn probe(paths: Paths, query: String) -> Result<()> {
         }
 
         if let Ok(payload) = &looked_up
-            && let Some(direct) = payload
-                .get("stream_url")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
+            && let Some(direct) = first_playable_url(payload)
         {
             println!("direct    fetching the cdn url the web client uses");
             let sample = tokio::task::spawn_blocking(move || {
@@ -539,6 +536,16 @@ pub async fn play_once(paths: Paths, query: String) -> Result<()> {
 
 pub(crate) fn wanted_len(query: &str) -> usize {
     query.split(';').filter(|q| !q.trim().is_empty()).count()
+}
+
+fn first_playable_url(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("playback")?
+        .as_array()?
+        .iter()
+        .filter_map(|resource| resource.get("url")?.as_str())
+        .find(|url| url.starts_with("https://"))
+        .map(str::to_string)
 }
 
 #[cfg(test)]

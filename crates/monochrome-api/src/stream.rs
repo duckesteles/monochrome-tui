@@ -5,18 +5,32 @@ use serde::Deserialize;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-pub const DEFAULT_AMAZON_URL: &str = "https://amz.geeked.wtf";
 const WEB_ORIGIN: &str = "https://monochrome.tf";
 pub const DEFAULT_DEEZER_URL: &str = "https://dzr.tabs-vs-spaces.wtf";
-pub const DEFAULT_PLAYBACK_URL: &str = "https://track-api.monochrome.tf";
+pub const DEFAULT_PLAYBACK_URL: &str = "https://music-api.geeked.wtf";
+pub const DEFAULT_PLAYBACK_TOKEN: &str = "amp_29b2lIr4mze4tK-P8QDOxfMZ9anCgJ9_uGTUks3nIyo";
+
+pub const RETIRED_PLAYBACK_URLS: &[&str] = &[
+    "https://amz.geeked.wtf",
+    "https://mono.geeked.wtf",
+    "https://track-api.monochrome.tf",
+];
+
 const JWT_LIFETIME: Duration = Duration::from_secs(55 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+pub fn is_retired_playback_url(url: &str) -> bool {
+    RETIRED_PLAYBACK_URLS.contains(&url.trim().trim_end_matches('/'))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Monochrome,
     Amazon,
+    Tidal,
+    Qobuz,
     Deezer,
+    Unnamed,
 }
 
 impl Source {
@@ -24,7 +38,21 @@ impl Source {
         match self {
             Source::Monochrome => "monochrome",
             Source::Amazon => "amazon",
+            Source::Tidal => "tidal",
+            Source::Qobuz => "qobuz",
             Source::Deezer => "deezer",
+            Source::Unnamed => "an unnamed source",
+        }
+    }
+
+    fn named(name: &str) -> Self {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "mono" | "monochrome" => Source::Monochrome,
+            "amazon" | "amazon_music" => Source::Amazon,
+            "tidal" => Source::Tidal,
+            "qobuz" => Source::Qobuz,
+            "deezer" => Source::Deezer,
+            _ => Source::Unnamed,
         }
     }
 }
@@ -42,10 +70,7 @@ pub struct StreamHandle {
 pub struct StreamConfig {
     pub playback_enabled: bool,
     pub playback_url: String,
-    pub amazon_enabled: bool,
-    pub amazon_url: String,
-    pub amazon_bypass_token: Option<String>,
-    pub amazon_api_key: Option<String>,
+    pub playback_token: Option<String>,
     pub turnstile_site_key: String,
     pub turnstile_action: String,
     pub deezer_enabled: bool,
@@ -57,10 +82,7 @@ impl StreamConfig {
         Self {
             playback_enabled: true,
             playback_url: DEFAULT_PLAYBACK_URL.into(),
-            amazon_enabled: true,
-            amazon_url: DEFAULT_AMAZON_URL.into(),
-            amazon_bypass_token: None,
-            amazon_api_key: None,
+            playback_token: None,
             turnstile_site_key: turnstile::DEFAULT_SITE_KEY.into(),
             turnstile_action: turnstile::DEFAULT_ACTION.into(),
             deezer_enabled: true,
@@ -70,31 +92,45 @@ impl StreamConfig {
 }
 
 #[derive(Debug, Deserialize)]
-struct AmazonTrack {
-    #[serde(default)]
-    asin: Option<String>,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    quality_selected: Option<String>,
-    #[serde(default)]
-    stream_url: Option<String>,
-    #[serde(default)]
-    decryption_key: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct TurnstileExchange {
-    access_token: String,
+    #[serde(default, alias = "jwt", alias = "token")]
+    access_token: Option<String>,
     #[serde(default)]
     expires_in: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
-struct PlaybackAnswer {
-    url: String,
+struct PlaybackEnvelope {
     #[serde(default)]
-    title: Option<String>,
+    schema_version: Option<String>,
+    #[serde(default)]
+    selected_source: Option<String>,
+    #[serde(default)]
+    quality_requested: Option<String>,
+    #[serde(default)]
+    playback: Vec<PlaybackResource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaybackResource {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    delivery: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    quality: Option<String>,
+    #[serde(default, alias = "decryptionKey")]
+    decryption_key: Option<String>,
+    #[serde(default)]
+    encryption: Option<serde_json::Value>,
+    #[serde(default)]
+    decryption: Option<serde_json::Value>,
+    #[serde(default)]
+    drm: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -169,8 +205,6 @@ pub enum Verification {
     NeedsBrowser { url: String },
 }
 
-type Credential = (Vec<(String, String)>, Vec<(String, String)>);
-
 pub struct StreamResolver {
     client: reqwest::Client,
     config: StreamConfig,
@@ -243,45 +277,21 @@ impl StreamResolver {
             .map(|jwt| jwt.token.clone())
     }
 
-    pub fn has_static_amazon_credential(&self) -> bool {
+    fn playback_token(&self) -> &str {
         self.config
-            .amazon_bypass_token
-            .as_ref()
-            .is_some_and(|t| !t.is_empty())
-            || self
-                .config
-                .amazon_api_key
-                .as_ref()
-                .is_some_and(|k| !k.is_empty())
+            .playback_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .unwrap_or(DEFAULT_PLAYBACK_TOKEN)
     }
 
-    pub fn has_amazon_credential(&self) -> bool {
-        self.has_static_amazon_credential() || self.has_session()
+    pub fn has_own_token(&self) -> bool {
+        self.playback_token() != DEFAULT_PLAYBACK_TOKEN
     }
 
-    fn amazon_credential(&self) -> Option<Credential> {
-        if let Some(token) = self
-            .config
-            .amazon_bypass_token
-            .as_ref()
-            .filter(|t| !t.is_empty())
-        {
-            return Some((vec![("bypass_token".into(), token.clone())], Vec::new()));
-        }
-        if let Some(key) = self
-            .config
-            .amazon_api_key
-            .as_ref()
-            .filter(|k| !k.is_empty())
-        {
-            return Some((Vec::new(), vec![("X-API-Key".into(), key.clone())]));
-        }
-        let guard = self.jwt.lock().expect("jwt");
-        let cached = guard.as_ref().filter(|jwt| jwt.is_valid())?;
-        Some((
-            Vec::new(),
-            vec![("X-Turnstile-JWT".into(), cached.token.clone())],
-        ))
+    pub fn has_playback_credential(&self) -> bool {
+        self.has_own_token() || self.has_session()
     }
 
     pub async fn start_verification(&self) -> ApiResult<Bridge> {
@@ -296,7 +306,8 @@ impl StreamResolver {
         let base = self.config.playback_url.trim_end_matches('/');
         let response = self
             .client
-            .post(format!("{base}/auth/turnstile"))
+            .post(format!("{base}/api/auth/turnstile"))
+            .bearer_auth(self.playback_token())
             .json(&serde_json::json!({ "turnstile_token": challenge_token }))
             .send()
             .await?;
@@ -314,80 +325,138 @@ impl StreamResolver {
         }
         let parsed: TurnstileExchange =
             serde_json::from_str(&body).map_err(|error| ApiError::Decode(error.to_string()))?;
+        let session = parsed
+            .access_token
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| ApiError::Decode("the browser check returned no session".into()))?;
         let lifetime = parsed
             .expires_in
             .filter(|seconds| *seconds > 0)
             .map(Duration::from_secs)
             .unwrap_or(JWT_LIFETIME);
-        self.cache_session(parsed.access_token, lifetime);
+        self.cache_session(session, lifetime);
         Ok(())
     }
 
-    async fn resolve_monochrome(&self, track: &Track) -> ApiResult<StreamHandle> {
-        let Some(session) = self.cached_jwt() else {
-            return Err(ApiError::TurnstileRequired);
-        };
+    fn playback_request(&self, track: &Track, quality: Quality) -> reqwest::RequestBuilder {
         let base = self.config.playback_url.trim_end_matches('/');
+        let mut request = self
+            .client
+            .get(format!("{base}/api/v2/track/"))
+            .header("Accept", "application/json")
+            .header("Origin", WEB_ORIGIN)
+            .header("Referer", format!("{WEB_ORIGIN}/"))
+            .bearer_auth(self.playback_token())
+            .query(&[
+                ("track", track.title.trim()),
+                ("intent", "stream"),
+                ("quality", quality.as_unified()),
+            ]);
 
-        let mut body = serde_json::json!({
-            "song_name": track.title,
-            "artist": track.artist_name(),
-        });
-        if let Some(isrc) = track.isrc.as_deref().filter(|isrc| !isrc.is_empty()) {
-            body["isrc"] = serde_json::Value::from(isrc);
+        let artist = track.artist_name().trim();
+        if !artist.is_empty() {
+            request = request.query(&[("artist", artist)]);
+        }
+        let album = track.album_title().trim();
+        if !album.is_empty() {
+            request = request.query(&[("album", album)]);
+        }
+        if let Some(isrc) = track
+            .isrc
+            .as_deref()
+            .map(str::trim)
+            .filter(|isrc| !isrc.is_empty())
+        {
+            request = request.query(&[("isrc", isrc.to_ascii_uppercase())]);
         }
         if track.duration > 0 {
-            body["duration"] = serde_json::Value::from(track.duration);
+            request = request.query(&[("duration", track.duration.to_string())]);
+        }
+        if let Some(session) = self.cached_jwt() {
+            request = request.header("X-Turnstile-JWT", session);
+        }
+        request
+    }
+
+    async fn playback_body(&self, track: &Track, quality: Quality) -> ApiResult<String> {
+        if track.title.trim().is_empty() {
+            return Err(ApiError::Decode(
+                "this track has no title to look up".into(),
+            ));
+        }
+        if !self.has_playback_credential() {
+            return Err(ApiError::TurnstileRequired);
         }
 
-        let response = self
-            .client
-            .post(format!("{base}/playback"))
-            .bearer_auth(&session)
-            .json(&body)
-            .send()
-            .await?;
-
+        let response = self.playback_request(track, quality).send().await?;
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        let body = response.text().await.unwrap_or_default();
         match status.as_u16() {
-            401 | 403 => {
+            401 => {
                 self.jwt.lock().expect("jwt").take();
+                if self.has_own_token() {
+                    return Err(ApiError::CredentialRejected);
+                }
                 return Err(ApiError::TurnstileRequired);
             }
+            403 => return Err(blocked_client()),
+            428 => return Err(ApiError::TurnstileRequired),
             429 => {
                 return Err(ApiError::Status {
                     code: 429,
                     message: "the playback service is rate limiting this client".into(),
                 });
             }
-            code if !status.is_success() => {
-                return Err(ApiError::Status {
-                    code,
-                    message: match gateway_message(&text) {
-                        Some(message) => format!("playback lookup failed: {message}"),
-                        None => "playback lookup failed".into(),
-                    },
-                });
-            }
+            404 => return Err(ApiError::NotFound),
+            code if !status.is_success() => return Err(lookup_failure(code, &body)),
             _ => {}
         }
+        Ok(body)
+    }
 
-        let answer: PlaybackAnswer =
-            serde_json::from_str(&text).map_err(|error| ApiError::Decode(error.to_string()))?;
-        if !answer.url.starts_with("https://") {
-            return Err(ApiError::Decode(
-                "the playback service returned no usable address".into(),
-            ));
+    pub async fn playback_lookup(
+        &self,
+        track: &Track,
+        quality: Quality,
+    ) -> ApiResult<serde_json::Value> {
+        let body = self.playback_body(track, quality).await?;
+        serde_json::from_str(&body).map_err(|error| ApiError::Decode(error.to_string()))
+    }
+
+    async fn resolve_playback(&self, track: &Track, quality: Quality) -> ApiResult<StreamHandle> {
+        let body = self.playback_body(track, quality).await?;
+        let envelope: PlaybackEnvelope =
+            serde_json::from_str(&body).map_err(|error| ApiError::Decode(error.to_string()))?;
+
+        if let Some(version) = envelope.schema_version.as_deref()
+            && !matches!(version.split('.').next(), Some("1") | Some("2"))
+        {
+            return Err(ApiError::Decode(format!(
+                "the playback service speaks schema {version}, this build understands 1 and 2"
+            )));
         }
-        let _ = answer.title;
+
+        let Some(resource) = envelope.playback.iter().find(|resource| playable(resource)) else {
+            return Err(ApiError::NotFound);
+        };
+
+        let source = resource
+            .source
+            .as_deref()
+            .or(envelope.selected_source.as_deref())
+            .map(Source::named)
+            .unwrap_or(Source::Unnamed);
 
         Ok(StreamHandle {
-            url: answer.url,
+            url: resource.url.clone().unwrap_or_default(),
             headers: Vec::new(),
-            source: Source::Monochrome,
-            quality: Some("LOSSLESS".into()),
-            decryption_key: None,
+            source,
+            quality: resource
+                .quality
+                .clone()
+                .or_else(|| envelope.quality_requested.clone()),
+            decryption_key: decryption_key(resource),
         })
     }
 
@@ -406,7 +475,7 @@ impl StreamResolver {
     }
 
     pub async fn gateway_client_ip(&self) -> Option<String> {
-        let base = self.config.amazon_url.trim_end_matches('/');
+        let base = self.config.playback_url.trim_end_matches('/');
         let response = self
             .client
             .get(format!("{base}/api/track/"))
@@ -416,27 +485,32 @@ impl StreamResolver {
             .ok()?;
         let body = response.text().await.ok()?;
         let value: serde_json::Value = serde_json::from_str(&body).ok()?;
-        value
-            .get("client_ip")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
+        for holder in [value.get("detail"), Some(&value)].into_iter().flatten() {
+            if let Some(address) = holder.get("client_ip").and_then(serde_json::Value::as_str) {
+                return Some(address.to_string());
+            }
+        }
+        None
     }
 
     pub async fn validate_credential(&self) -> ApiResult<()> {
-        let Some((query, headers)) = self.amazon_credential() else {
+        if !self.has_playback_credential() {
             return Err(ApiError::TurnstileRequired);
-        };
-        let base = self.config.amazon_url.trim_end_matches('/');
-        let mut request = self.client.get(format!("{base}/api/track/")).query(&[
-            ("title", "monochrome"),
-            ("artist", "monochrome"),
-            ("quality", "HD"),
-        ]);
-        for (key, value) in &query {
-            request = request.query(&[(key.as_str(), value.as_str())]);
         }
-        for (key, value) in &headers {
-            request = request.header(key.as_str(), value.as_str());
+        let base = self.config.playback_url.trim_end_matches('/');
+        let mut request = self
+            .client
+            .get(format!("{base}/api/v2/track/"))
+            .header("Accept", "application/json")
+            .bearer_auth(self.playback_token())
+            .query(&[
+                ("track", "monochrome"),
+                ("artist", "monochrome"),
+                ("intent", "stream"),
+                ("quality", Quality::Lossless.as_unified()),
+            ]);
+        if let Some(session) = self.cached_jwt() {
+            request = request.header("X-Turnstile-JWT", session);
         }
 
         let response = request.send().await?;
@@ -446,6 +520,7 @@ impl StreamResolver {
                 self.jwt.lock().expect("jwt").take();
                 Err(ApiError::CredentialRejected)
             }
+            403 => Err(blocked_client()),
             428 => Err(ApiError::TurnstileRequired),
             code if code >= 500 => {
                 let body = response.text().await.unwrap_or_default();
@@ -456,21 +531,8 @@ impl StreamResolver {
     }
 
     pub fn credential_kind(&self) -> &'static str {
-        if self
-            .config
-            .amazon_bypass_token
-            .as_ref()
-            .is_some_and(|t| !t.is_empty())
-        {
-            return "bypass token from the config";
-        }
-        if self
-            .config
-            .amazon_api_key
-            .as_ref()
-            .is_some_and(|k| !k.is_empty())
-        {
-            return "api key from the config";
+        if self.has_own_token() {
+            return "api token from the config";
         }
         if self
             .jwt
@@ -479,54 +541,9 @@ impl StreamResolver {
             .as_ref()
             .is_some_and(CachedJwt::is_valid)
         {
-            return "playback session from the browser check";
+            return "the shared token and a playback session from the browser check";
         }
-        "none"
-    }
-
-    pub async fn amazon_lookup(
-        &self,
-        track: &Track,
-        quality: Quality,
-    ) -> ApiResult<serde_json::Value> {
-        let Some((query, headers)) = self.amazon_credential() else {
-            return Err(ApiError::TurnstileRequired);
-        };
-        let base = self.config.amazon_url.trim_end_matches('/');
-        let mut request = self
-            .client
-            .get(format!("{base}/api/track/"))
-            .header("Origin", WEB_ORIGIN)
-            .header("Referer", format!("{WEB_ORIGIN}/"))
-            .query(&[
-                ("title", track.title.as_str()),
-                ("artist", track.artist_name()),
-                ("album", track.album_title()),
-                ("quality", quality.as_amazon()),
-            ]);
-        if let Some(isrc) = track.isrc.as_deref() {
-            request = request.query(&[("isrc", isrc)]);
-        }
-        for (key, value) in &query {
-            request = request.query(&[(key.as_str(), value.as_str())]);
-        }
-        for (key, value) in &headers {
-            request = request.header(key.as_str(), value.as_str());
-        }
-
-        let response = request.send().await?;
-        let status = response.status();
-        let body = response.text().await?;
-        if status.as_u16() == 401 {
-            return Err(ApiError::CredentialRejected);
-        }
-        if status.as_u16() == 428 {
-            return Err(ApiError::TurnstileRequired);
-        }
-        if !status.is_success() {
-            return Err(lookup_failure(status.as_u16(), &body));
-        }
-        serde_json::from_str(&body).map_err(|error| ApiError::Decode(error.to_string()))
+        "the shared token, no browser check yet"
     }
 
     pub async fn resolve(&self, track: &Track, quality: Quality) -> ApiResult<StreamHandle> {
@@ -537,14 +554,7 @@ impl StreamResolver {
         };
 
         if self.config.playback_enabled {
-            match self.resolve_monochrome(track).await {
-                Ok(handle) => return Ok(handle),
-                Err(error) => last = remember(last, error),
-            }
-        }
-
-        if self.config.amazon_enabled && self.has_static_amazon_credential() {
-            match self.resolve_amazon(track, quality).await {
+            match self.resolve_playback(track, quality).await {
                 Ok(handle) => return Ok(handle),
                 Err(error) => last = remember(last, error),
             }
@@ -560,66 +570,6 @@ impl StreamResolver {
         }
 
         Err(last.unwrap_or(ApiError::NoSourceEnabled))
-    }
-
-    async fn resolve_amazon(&self, track: &Track, quality: Quality) -> ApiResult<StreamHandle> {
-        let Some((query, headers)) = self.amazon_credential() else {
-            return Err(ApiError::TurnstileRequired);
-        };
-        let base = self.config.amazon_url.trim_end_matches('/');
-
-        let mut request = self.client.get(format!("{base}/api/track/")).query(&[
-            ("title", track.title.as_str()),
-            ("artist", track.artist_name()),
-            ("album", track.album_title()),
-            ("quality", quality.as_amazon()),
-        ]);
-        if let Some(isrc) = track.isrc.as_deref() {
-            request = request.query(&[("isrc", isrc)]);
-        }
-        for (key, value) in &query {
-            request = request.query(&[(key.as_str(), value.as_str())]);
-        }
-        for (key, value) in &headers {
-            request = request.header(key.as_str(), value.as_str());
-        }
-
-        let response = request.send().await?;
-        let status = response.status();
-        if status.as_u16() == 401 {
-            self.jwt.lock().expect("jwt").take();
-            return Err(ApiError::CredentialRejected);
-        }
-        if status.as_u16() == 428 {
-            return Err(ApiError::TurnstileRequired);
-        }
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(lookup_failure(status.as_u16(), &body));
-        }
-
-        let body = response.text().await?;
-        let payload = extract_track_payload(&body)?;
-
-        let direct = payload
-            .stream_url
-            .as_deref()
-            .filter(|url| url.starts_with("https://"))
-            .map(str::to_string);
-
-        let Some(url) = direct else {
-            return Err(ApiError::Decode(
-                "amazon returned no stream address for this track".into(),
-            ));
-        };
-
-        Ok(StreamHandle {
-            url,
-            headers: Vec::new(),
-            source: Source::Amazon,
-            quality: payload.quality_selected,
-            decryption_key: payload.decryption_key,
-        })
     }
 
     async fn resolve_deezer(&self, isrc: &str, quality: Quality) -> ApiResult<StreamHandle> {
@@ -667,10 +617,59 @@ fn lookup_failure(code: u16, body: &str) -> ApiError {
     ApiError::Status {
         code,
         message: match gateway_message(body) {
-            Some(message) => format!("amazon lookup failed: {message}"),
-            None => "amazon lookup failed".into(),
+            Some(message) => format!("playback lookup failed: {message}"),
+            None => "playback lookup failed".into(),
         },
     }
+}
+
+fn blocked_client() -> ApiError {
+    ApiError::Status {
+        code: 403,
+        message: "the playback service has blocked this address for now".into(),
+    }
+}
+
+fn playable(resource: &PlaybackResource) -> bool {
+    let Some(url) = resource.url.as_deref() else {
+        return false;
+    };
+    url.starts_with("https://")
+        && matches!(resource.delivery.as_deref(), None | Some("direct"))
+        && matches!(resource.kind.as_deref(), Some("audio") | Some("manifest"))
+        && !url.contains(".mpd")
+        && !url.contains(".m3u8")
+}
+
+fn decryption_key(resource: &PlaybackResource) -> Option<String> {
+    if let Some(key) = resource
+        .decryption_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        return Some(key.to_string());
+    }
+    [&resource.encryption, &resource.decryption, &resource.drm]
+        .into_iter()
+        .flatten()
+        .find_map(nested_key)
+}
+
+fn nested_key(holder: &serde_json::Value) -> Option<String> {
+    for name in ["key", "decryption_key", "decryptionKey"] {
+        let Some(found) = holder.get(name) else {
+            continue;
+        };
+        let text = match found {
+            serde_json::Value::String(text) => Some(text.as_str()),
+            other => other.get("value").and_then(serde_json::Value::as_str),
+        };
+        if let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) {
+            return Some(text.to_string());
+        }
+    }
+    None
 }
 
 fn gateway_message(body: &str) -> Option<String> {
@@ -732,29 +731,6 @@ fn strip_tags(body: &str) -> String {
     }
     text.push_str(rest);
     text
-}
-
-fn extract_track_payload(body: &str) -> ApiResult<AmazonTrack> {
-    let value: serde_json::Value =
-        serde_json::from_str(body).map_err(|error| ApiError::Decode(error.to_string()))?;
-    for candidate in [
-        value.get("data"),
-        value.get("track"),
-        value.get("result"),
-        Some(&value),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if let Ok(parsed) = serde_json::from_value::<AmazonTrack>(candidate.clone())
-            && (parsed.asin.is_some() || parsed.id.is_some())
-        {
-            return Ok(parsed);
-        }
-    }
-    Err(ApiError::Decode(
-        "amazon returned an unexpected body".into(),
-    ))
 }
 
 fn urlencode(value: &str) -> String {
@@ -852,7 +828,7 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "server returned 500: amazon lookup failed: [Amazon-Direct] Manifest request failed: 400"
+            "server returned 500: playback lookup failed: [Amazon-Direct] Manifest request failed: 400"
         );
     }
 
@@ -860,11 +836,11 @@ mod tests {
     fn a_body_that_says_nothing_still_reports_the_code() {
         assert_eq!(
             lookup_failure(502, "").to_string(),
-            "server returned 502: amazon lookup failed"
+            "server returned 502: playback lookup failed"
         );
         assert_eq!(
             lookup_failure(502, "   ").to_string(),
-            "server returned 502: amazon lookup failed"
+            "server returned 502: playback lookup failed"
         );
     }
 
@@ -945,7 +921,6 @@ mod tests {
     async fn switching_every_source_off_says_so_plainly() {
         let mut config = StreamConfig::with_defaults();
         config.playback_enabled = false;
-        config.amazon_enabled = false;
         config.deezer_enabled = false;
         let error = resolver(config)
             .resolve(&track(), Quality::Lossless)
@@ -984,54 +959,97 @@ mod tests {
     }
 
     #[test]
-    fn a_bypass_token_travels_as_a_query_parameter() {
-        let mut config = StreamConfig::with_defaults();
-        config.amazon_bypass_token = Some("secret".into());
-        let (query, headers) = resolver(config).amazon_credential().expect("credential");
-        assert_eq!(
-            query,
-            vec![("bypass_token".to_string(), "secret".to_string())]
-        );
-        assert!(headers.is_empty());
-    }
-
-    #[test]
-    fn an_api_key_travels_as_a_header() {
-        let mut config = StreamConfig::with_defaults();
-        config.amazon_api_key = Some("key".into());
-        let (query, headers) = resolver(config).amazon_credential().expect("credential");
-        assert!(query.is_empty());
-        assert_eq!(headers, vec![("X-API-Key".to_string(), "key".to_string())]);
-    }
-
-    #[test]
-    fn a_bypass_token_outranks_an_api_key() {
-        let mut config = StreamConfig::with_defaults();
-        config.amazon_bypass_token = Some("secret".into());
-        config.amazon_api_key = Some("key".into());
-        let (query, _) = resolver(config).amazon_credential().expect("credential");
-        assert_eq!(query[0].0, "bypass_token");
-    }
-
-    #[test]
-    fn an_empty_credential_counts_as_absent() {
-        let mut config = StreamConfig::with_defaults();
-        config.amazon_bypass_token = Some(String::new());
-        config.amazon_api_key = Some(String::new());
-        let resolver = resolver(config);
-        assert!(resolver.amazon_credential().is_none());
-        assert!(!resolver.has_amazon_credential());
-    }
-
-    #[test]
-    fn a_cached_jwt_is_used_when_no_static_credential_exists() {
+    fn without_a_token_of_your_own_the_shared_one_is_used() {
         let resolver = resolver(StreamConfig::with_defaults());
-        assert!(resolver.amazon_credential().is_none());
+        assert_eq!(resolver.playback_token(), DEFAULT_PLAYBACK_TOKEN);
+        assert!(!resolver.has_own_token());
+    }
+
+    #[test]
+    fn a_token_from_the_config_replaces_the_shared_one() {
+        let mut config = StreamConfig::with_defaults();
+        config.playback_token = Some("  mine  ".into());
+        let resolver = resolver(config);
+        assert_eq!(resolver.playback_token(), "mine");
+        assert!(resolver.has_own_token());
+        assert!(resolver.has_playback_credential());
+    }
+
+    #[test]
+    fn a_blank_token_counts_as_absent() {
+        let mut config = StreamConfig::with_defaults();
+        config.playback_token = Some("   ".into());
+        let resolver = resolver(config);
+        assert!(!resolver.has_own_token());
+        assert!(!resolver.has_playback_credential());
+    }
+
+    #[test]
+    fn the_shared_token_needs_a_browser_check_before_it_counts() {
+        let resolver = resolver(StreamConfig::with_defaults());
+        assert!(!resolver.has_playback_credential());
         resolver.cache_jwt("jwt-value".into());
-        let (query, headers) = resolver.amazon_credential().expect("credential");
-        assert!(query.is_empty());
-        assert_eq!(headers[0].0, "X-Turnstile-JWT");
-        assert!(resolver.has_amazon_credential());
+        assert!(resolver.has_playback_credential());
+    }
+
+    #[test]
+    fn every_url_the_service_left_behind_is_recognised() {
+        assert!(is_retired_playback_url("https://track-api.monochrome.tf"));
+        assert!(is_retired_playback_url("https://amz.geeked.wtf/"));
+        assert!(is_retired_playback_url("  https://mono.geeked.wtf  "));
+        assert!(!is_retired_playback_url(DEFAULT_PLAYBACK_URL));
+        assert!(!is_retired_playback_url("https://my-own-mirror.example"));
+    }
+
+    #[test]
+    fn only_a_resource_this_player_can_read_is_offered() {
+        let direct = resource(r#"{"url":"https://cdn.example/a.flac","kind":"audio"}"#);
+        assert!(playable(&direct));
+
+        let dash =
+            resource(r#"{"url":"https://cdn.example/a.mpd","kind":"manifest","delivery":"dash"}"#);
+        assert!(!playable(&dash), "this build cannot read a dash manifest");
+
+        let hls =
+            resource(r#"{"url":"https://cdn.example/a.m3u8","kind":"audio","delivery":"hls"}"#);
+        assert!(!playable(&hls));
+
+        let plaintext = resource(r#"{"url":"http://cdn.example/a.flac","kind":"audio"}"#);
+        assert!(!playable(&plaintext), "an unencrypted hop is refused");
+
+        let nameless = resource(r#"{"url":"https://cdn.example/a.flac"}"#);
+        assert!(!playable(&nameless), "an unlabelled resource is skipped");
+    }
+
+    #[test]
+    fn a_key_is_found_wherever_the_service_chooses_to_put_it() {
+        let flat = resource(r#"{"decryption_key":"aa"}"#);
+        assert_eq!(decryption_key(&flat).as_deref(), Some("aa"));
+
+        let nested = resource(r#"{"encryption":{"key":{"value":"bb"}}}"#);
+        assert_eq!(decryption_key(&nested).as_deref(), Some("bb"));
+
+        let plain = resource(r#"{"decryption":{"key":"cc"}}"#);
+        assert_eq!(decryption_key(&plain).as_deref(), Some("cc"));
+
+        let drm = resource(r#"{"drm":{"decryption_key":"dd"}}"#);
+        assert_eq!(decryption_key(&drm).as_deref(), Some("dd"));
+
+        let none = resource(r#"{"encryption":{"key":{"value":"  "}}}"#);
+        assert_eq!(decryption_key(&none), None);
+    }
+
+    #[test]
+    fn every_source_the_service_can_pick_has_a_name() {
+        assert_eq!(Source::named("mono").label(), "monochrome");
+        assert_eq!(Source::named("Amazon").label(), "amazon");
+        assert_eq!(Source::named(" tidal ").label(), "tidal");
+        assert_eq!(Source::named("qobuz").label(), "qobuz");
+        assert_eq!(Source::named("something-new"), Source::Unnamed);
+    }
+
+    fn resource(json: &str) -> PlaybackResource {
+        serde_json::from_str(json).expect("resource")
     }
 
     #[test]
@@ -1061,46 +1079,32 @@ mod tests {
             obtained: Instant::now() - JWT_LIFETIME - Duration::from_secs(1),
             lifetime: JWT_LIFETIME,
         });
-        assert!(resolver.amazon_credential().is_none());
-    }
-
-    #[test]
-    fn the_amazon_payload_is_found_at_any_nesting_level() {
-        let flat = extract_track_payload(r#"{"asin":"B0DXYZ1234"}"#).expect("flat");
-        assert_eq!(flat.asin.as_deref(), Some("B0DXYZ1234"));
-        let nested = extract_track_payload(r#"{"data":{"asin":"B0DXYZ1234"}}"#).expect("nested");
-        assert_eq!(nested.asin.as_deref(), Some("B0DXYZ1234"));
-        let wrapped = extract_track_payload(r#"{"track":{"id":"B0DXYZ1234"}}"#).expect("wrapped");
-        assert_eq!(wrapped.id.as_deref(), Some("B0DXYZ1234"));
-    }
-
-    #[test]
-    fn an_unrecognisable_amazon_body_is_an_error() {
-        assert!(extract_track_payload(r#"{"detail":"nope"}"#).is_err());
+        assert!(!resolver.has_playback_credential());
     }
 
     #[test]
     fn quality_tokens_match_the_web_client() {
-        assert_eq!(Quality::HiRes.as_amazon(), "UHD");
-        assert_eq!(Quality::Lossless.as_amazon(), "HD");
-        assert_eq!(Quality::High.as_amazon(), "SD_HIGH");
-        assert_eq!(Quality::Low.as_amazon(), "SD_LOW");
+        assert_eq!(Quality::HiRes.as_unified(), "HI_RES_LOSSLESS");
+        assert_eq!(Quality::Lossless.as_unified(), "LOSSLESS");
+        assert_eq!(Quality::High.as_unified(), "HIGH");
+        assert_eq!(Quality::Low.as_unified(), "LOW");
+        assert_eq!(Quality::Atmos.as_unified(), "DOLBY_ATMOS");
     }
 
     #[tokio::test]
     async fn a_track_without_an_isrc_never_reaches_deezer() {
         let mut config = StreamConfig::with_defaults();
-        config.amazon_enabled = false;
+        config.playback_enabled = false;
         config.deezer_enabled = true;
         let resolver = resolver(config);
         let mut bare = track();
         bare.isrc = None;
         let error = resolver.resolve(&bare, Quality::Lossless).await;
-        assert!(error.is_err());
+        assert!(matches!(error, Err(ApiError::NoSourceEnabled)));
     }
 
     #[tokio::test]
-    async fn amazon_without_a_credential_reports_that_verification_is_needed() {
+    async fn playback_without_a_credential_reports_that_verification_is_needed() {
         let mut config = StreamConfig::with_defaults();
         config.deezer_enabled = false;
         let resolver = resolver(config);
