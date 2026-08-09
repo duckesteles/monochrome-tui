@@ -257,6 +257,16 @@ pub struct StreamResolver {
 
 impl StreamResolver {
     pub fn new(config: StreamConfig) -> ApiResult<Self> {
+        if config.playback_enabled && !crate::is_transport_allowed(&config.playback_url) {
+            return Err(ApiError::Network(
+                "the playback service must be reached over https, it is sent your token".into(),
+            ));
+        }
+        if config.deezer_enabled && !crate::is_transport_allowed(&config.deezer_url) {
+            return Err(ApiError::Network(
+                "the deezer fallback must be reached over https".into(),
+            ));
+        }
         let client = crate::http_client(REQUEST_TIMEOUT)?;
         Ok(Self {
             client,
@@ -1043,6 +1053,37 @@ mod tests {
 
     fn resolver(config: StreamConfig) -> StreamResolver {
         StreamResolver::new(config).expect("resolver")
+    }
+
+    #[test]
+    fn a_playback_service_reached_in_the_clear_is_refused_before_a_token_is_sent() {
+        let mut config = StreamConfig::with_defaults();
+        config.playback_url = "http://playback.example".into();
+        let error = match StreamResolver::new(config) {
+            Err(error) => error,
+            Ok(_) => panic!("a plaintext playback service must be refused"),
+        };
+        assert!(error.to_string().contains("https"), "{error}");
+
+        let mut config = StreamConfig::with_defaults();
+        config.deezer_url = "http://deezer.example".into();
+        assert!(StreamResolver::new(config).is_err());
+    }
+
+    #[test]
+    fn a_service_you_run_yourself_on_this_machine_is_still_allowed() {
+        let mut config = StreamConfig::with_defaults();
+        config.playback_url = "http://127.0.0.1:8080".into();
+        config.deezer_url = "http://localhost:9000".into();
+        assert!(StreamResolver::new(config).is_ok());
+    }
+
+    #[test]
+    fn a_source_switched_off_is_not_held_to_the_transport_rule() {
+        let mut config = StreamConfig::with_defaults();
+        config.deezer_enabled = false;
+        config.deezer_url = "http://whatever.example".into();
+        assert!(StreamResolver::new(config).is_ok());
     }
 
     #[test]

@@ -1,0 +1,312 @@
+{
+  "version": "2.10",
+  "playlist": {
+    "uuid": "19bbde7f-1fa0-4822-b285-fcbce44a18c4",
+    "title": "Hip-Hop Party Hits",
+    "numberOfTracks": 200,
+    "numberOfVideos": 0,
+    "creator": {
+      "id": 0
+    },
+    "description": "Hip-hop makes any function come alive. Get things moving with these fire party-starters. (Photo: Unsplash)",
+    "duration": 34617,
+    "lastUpdated": "2026-07-17T21:29:23.609+0000",
+    "created": "2018-08-27T15:05:33.177+0000",
+    "type": "EDITORIAL",
+    "publicPlaylist": true,
+    "url": "http://www.tidal.com/playlist/19bbde7f-1fa0-4822-b285-fcbce44a18c4",
+    "image": "f8889c5a-f5f9-4621-960a-14871e3f5caa",
+    "popularity": 0,
+    "squareImage": "9865171d-3a2d-450f-9e2d-3b763fa8e26d",
+    "customImageUrl": null,
+    "promotedArtists": [
+      {
+        "id": 15783216,
+        "name": "Yung Miami",
+        "handle": null,
+        "type": "MAIN",
+        "picture": null
+      },
+      {
+        "id": 3632070,
+        "name": "Drake",
+        "handle": null,
+        "type": "MAIN",
+        "picture": null
+      },
+      {
+        "id": 10063175,
+        "name": "Sexyy Red",
+        "handle": null,
+        "type": "MAIN",
+        "picture": null
+      },
+      {
+        "id": 8274007,
+        "name": "DaBaby",
+        "handle": null,
+        "type": "MAIN",
+        "picture": null
+      }
+    ],
+    "lastItemAddedAt": "2026-07-17T21:29:23.593+0000"
+  },
+  "items": [
+    {
+      "item": {
+        "id": 516681628,
+        "title": "Spend Dat",
+        "duration": 181,
+        "replayGain": -8.49,
+        "peak": 0.966258,
+        "allowStreaming": true,
+        "streamReady": true,
+        "payToStream": false,
+        "adSupportedStreamReady": true,
+        "djReady": true,
+        "stemReady": false,
+        "streamStartDate": "2026-04-24T00:00:00.000+0000",
+        "premiumStreamingOnly": false,
+        "trackNumber": 1,
+        "volumeNumber": 1,
+        "version": null,
+        "popularity": 79,
+        "copyright": "℗ 2026 Yung Miami LLC, under exclusive license to Uptown Records, a division of UMG Recordings, Inc.",
+        "bpm": 90,
+        "key": "CSharp",
+        "keyScale": "MAJOR",
+        "description": null,
+        "url": "http://www.tidal.com/track/516681628",
+        "isrc": "USUG12603255",
+        "editable": false,
+        "explicit": true,
+        "audioQuality": "LOSSLESS",
+        "audioModes": [
+          "STEREO"
+        ],
+        "mediaMetadata": {
+          "tags": [
+            "LOSSLESS",
+            "HIRES_LOSSLESS"
+          ]
+        },
+        "upload": false,
+        "accessType": "PUBLIC",
+        "spotlighted": false,
+        "ai": false,
+        "artist": {
+          "id": 15783216,
+          "name": "Yung Miami",
+          "handle": null,
+          "type": "MAIN",
+          "picture": "be351c41-a13c-4d46-a774-396158a79acc"
+        },
+        "artists": [
+          {
+            "id": 15783216,
+            "name": "Yung Miami",
+            "handle": null,
+            "type": "MAIN",
+            "picture": "be351c41-a13c-4d46-a774-396158a79acc"
+          }
+        ],
+        "album": {
+          "id": 516681627,
+          "title": "Spend Dat",
+          "cover": "b321ced5-99fe-4c47-a543-c097fbadc98b",
+          "vibrantColor": "#de2c98",
+          "videoCover": null,
+          "releaseDate": "2026-04-24"
+        },
+        "mixes": {
+          "TRACK_MIX": "0012c48b7a6f5e05bc78785acf3b18"
+        },
+        "dateAdded": "2026-07-17T21:29:23.593+0000",
+        "index": 1562,
+        "itemUuid": "1a0e8404-1256-4c4d-8b72-250c28bdcaf8"
+      },
+      "type": "track",
+      "cut": null
+    },
+    {
+      "item": {
+        "id": 524847542,
+        "title": "Cheetah Print",
+        "duration": 202,
+        "replayGain": -9.41,
+        "peak": 0.999958,
+        "allowStreaming": true,
+        "streamReady": true,
+        "payToStream": false,
+        "adSupportedStreamReady": true,
+        "djReady": true,
+        "stemReady": false,
+        "streamStartDate": "2026-05-15T00:00:00.000+0000",
+        "premiumStreamingOnly": false,
+        "trackNumber": 4,
+        "volumeNumber": 1,
+        "version": null,
+        "popularity": 71,
+        "copyright": "℗ 2026 OVO, under exclusive license to Republic Records, a division of UMG Recordings Inc.",
+        "bpm": null,
+        "key": null,
+        "keyScale": null,
+        "description": null,
+        "url": "http://www.tidal.com/track/524847542",
+        "isrc": "USUG12602462",
+        "editable": false,
+        "explicit": true,
+        "audioQuality": "LOSSLESS",
+        "audioModes": [
+          "STEREO"
+        ],
+        "mediaMetadata": {
+          "tags": [
+            "LOSSLESS",
+            "HIRES_LOSSLESS"
+          ]
+        },
+        "upload": false,
+        "accessType": "PUBLIC",
+        "spotlighted": false,
+        "ai": false,
+        "artist": {
+          "id": 3632070,
+          "name": "Drake",
+          "handle": null,
+          "type": "MAIN",
+          "picture": "3812d980-630e-4948-a72e-f21a546ec2e3"
+        },
+        "artists": [
+          {
+            "id": 3632070,
+            "name": "Drake",
+            "handle": null,
+            "type": "MAIN",
+            "picture": "3812d980-630e-4948-a72e-f21a546ec2e3"
+          },
+          {
+            "id": 10063175,
+            "name": "Sexyy Red",
+            "handle": null,
+            "type": "MAIN",
+            "picture": "e549ab52-bebb-46fa-8bd8-df4eab0d8bf0"
+          }
+        ],
+        "album": {
+          "id": 524847534,
+          "title": "MAID OF HONOUR",
+          "cover": "e4184a83-e37e-4ce7-ac87-c6f83d943418",
+          "vibrantColor": "#f6ecdb",
+          "videoCover": null,
+          "releaseDate": "2026-05-15"
+        },
+        "mixes": {
+          "TRACK_MIX": "001c1dfbe605c86ead8c5f82fd458e"
+        },
+        "dateAdded": "2026-07-17T21:29:23.593+0000",
+        "index": 3125,
+        "itemUuid": "baf4d4ac-d988-441d-a8bb-2290facc161f"
+      },
+      "type": "track",
+      "cut": null
+    },
+    {
+      "item": {
+        "id": 519714324,
+        "title": "POP DAT THANG",
+        "duration": 235,
+        "replayGain": -7.16,
+        "peak": 0.98585,
+        "allowStreaming": true,
+        "streamReady": true,
+        "payToStream": false,
+        "adSupportedStreamReady": true,
+        "djReady": true,
+        "stemReady": false,
+        "streamStartDate": "2026-05-01T00:00:00.000+0000",
+        "premiumStreamingOnly": false,
+        "trackNumber": 1,
+        "volumeNumber": 1,
+        "version": "Official Remix",
+        "popularity": 74,
+        "copyright": "℗ 2026 Interscope Records",
+        "bpm": 139,
+        "key": "F",
+        "keyScale": "MINOR",
+        "description": null,
+        "url": "http://www.tidal.com/track/519714324",
+        "isrc": "USUM72603317",
+        "editable": false,
+        "explicit": true,
+        "audioQuality": "LOSSLESS",
+        "audioModes": [
+          "STEREO"
+        ],
+        "mediaMetadata": {
+          "tags": [
+            "LOSSLESS",
+            "HIRES_LOSSLESS"
+          ]
+        },
+        "upload": false,
+        "accessType": "PUBLIC",
+        "spotlighted": false,
+        "ai": false,
+        "artist": {
+          "id": 8274007,
+          "name": "DaBaby",
+          "handle": null,
+          "type": "MAIN",
+          "picture": "872c46a5-5cca-4cbf-8117-17fa545167cc"
+        },
+        "artists": [
+          {
+            "id": 8274007,
+            "name": "DaBaby",
+            "handle": null,
+            "type": "MAIN",
+            "picture": "872c46a5-5cca-4cbf-8117-17fa545167cc"
+          },
+          {
+            "id": 11000875,
+            "name": "GloRilla",
+            "handle": null,
+            "type": "MAIN",
+            "picture": "006fb74b-7035-4c78-986f-df1056bbb021"
+          },
+          {
+            "id": 15783216,
+            "name": "Yung Miami",
+            "handle": null,
+            "type": "FEATURED",
+            "picture": "be351c41-a13c-4d46-a774-396158a79acc"
+          },
+          {
+            "id": 54025743,
+            "name": "YKNIECE",
+            "handle": null,
+            "type": "MAIN",
+            "picture": null
+          }
+        ],
+        "album": {
+          "id": 519714323,
+          "title": "POP DAT THANG (Official Remix)",
+          "cover": "f7cc16a3-d6d6-4f33-8332-790cd29bfa14",
+          "vibrantColor": "#f482f1",
+          "videoCover": null,
+          "releaseDate": "2026-04-30"
+        },
+        "mixes": {
+          "TRACK_MIX": "0019efb8de31c55c5fda71b5c34aee"
+        },
+        "dateAdded": "2026-07-17T21:29:23.593+0000",
+        "index": 4687,
+        "itemUuid": "b42bee0b-1138-4d1d-b5c7-54145e1e62de"
+      },
+      "type": "track",
+      "cut": null
+    }
+  ]
+}

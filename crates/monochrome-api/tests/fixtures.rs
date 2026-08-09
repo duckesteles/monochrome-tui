@@ -121,10 +121,22 @@ fn a_live_artist_albums_response_parses() {
 }
 
 #[test]
-fn a_live_manifest_response_exposes_its_presentation() {
-    let envelope: Envelope<ManifestEnvelope> = parse("track_manifest");
-    let attributes = envelope.data.data.attributes;
-    assert_eq!(attributes.presentation.as_deref(), Some("PREVIEW"));
-    assert!(attributes.uri.is_some());
-    assert_eq!(attributes.formats, vec!["FLAC".to_string()]);
+fn a_live_playlist_response_parses() {
+    let envelope: PlaylistEnvelope = parse("playlist");
+    let playlist = envelope
+        .playlist
+        .into_core()
+        .expect("a playlist with a uuid");
+    assert_eq!(playlist.uuid, "19bbde7f-1fa0-4822-b285-fcbce44a18c4");
+    assert_eq!(playlist.title, "Hip-Hop Party Hits");
+    assert_eq!(playlist.number_of_tracks, Some(200));
+
+    let tracks: Vec<_> = envelope
+        .items
+        .into_iter()
+        .map(|entry| entry.item.into_core())
+        .collect();
+    assert!(!tracks.is_empty());
+    assert!(tracks[0].id > 0);
+    assert!(!tracks[0].title.is_empty());
 }
