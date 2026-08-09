@@ -117,6 +117,7 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
             app.queue_selected();
             Vec::new()
         }
+        Action::Radio => app.start_radio(),
         Action::Insert(character) => {
             match app.focus {
                 Focus::SearchInput => app.search_input.push(character),

@@ -28,7 +28,14 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("m s r", "mute, shuffle, repeat"),
         ],
     ),
-    ("library", &[("f", "save or unsave"), ("a", "add to queue")]),
+    (
+        "library",
+        &[
+            ("f", "save or unsave"),
+            ("a", "add to queue"),
+            ("R", "queue more tracks like this one"),
+        ],
+    ),
     ("leave", &[("?", "close this"), ("Q ctrl+c", "quit")]),
 ];
 

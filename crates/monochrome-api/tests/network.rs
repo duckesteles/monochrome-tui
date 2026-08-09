@@ -1,5 +1,5 @@
 use monochrome_api::auth::AuthClient;
-use monochrome_api::catalog::{Catalog, Instance};
+use monochrome_api::catalog::{ApiVersion, Catalog, Instance};
 use monochrome_api::error::ApiError;
 use monochrome_api::stream::{StreamConfig, StreamResolver};
 use monochrome_core::library::SyncField;
@@ -8,7 +8,7 @@ use serde_json::json;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-fn instance(server: &MockServer, version: f32) -> Instance {
+fn instance(server: &MockServer, version: ApiVersion) -> Instance {
     Instance::new(server.uri(), version)
 }
 
@@ -46,8 +46,11 @@ async fn a_failing_instance_is_skipped_for_a_healthy_one() {
         .mount(&healthy)
         .await;
 
-    let catalog =
-        Catalog::new(vec![instance(&broken, 2.10), instance(&healthy, 2.10)]).expect("catalog");
+    let catalog = Catalog::new(vec![
+        instance(&broken, ApiVersion::new(2, 10)),
+        instance(&healthy, ApiVersion::new(2, 10)),
+    ])
+    .expect("catalog");
     let tracks = catalog.search_tracks("test").await.expect("tracks");
     assert_eq!(tracks.len(), 1);
     assert_eq!(tracks[0].title, "Test Track");
@@ -68,8 +71,11 @@ async fn the_healthy_instance_becomes_preferred_after_a_failover() {
         .mount(&healthy)
         .await;
 
-    let catalog =
-        Catalog::new(vec![instance(&broken, 2.10), instance(&healthy, 2.10)]).expect("catalog");
+    let catalog = Catalog::new(vec![
+        instance(&broken, ApiVersion::new(2, 10)),
+        instance(&healthy, ApiVersion::new(2, 10)),
+    ])
+    .expect("catalog");
     catalog.search_tracks("first").await.expect("first");
     catalog.search_tracks("second").await.expect("second");
 
@@ -89,7 +95,7 @@ async fn a_repeated_request_is_served_from_cache() {
         .mount(&server)
         .await;
 
-    let catalog = Catalog::new(vec![instance(&server, 2.10)]).expect("catalog");
+    let catalog = Catalog::new(vec![instance(&server, ApiVersion::new(2, 10))]).expect("catalog");
     catalog.search_tracks("same").await.expect("first");
     catalog.search_tracks("same").await.expect("second");
 }
@@ -102,7 +108,7 @@ async fn every_instance_failing_is_reported_as_such() {
         .mount(&server)
         .await;
 
-    let catalog = Catalog::new(vec![instance(&server, 2.10)]).expect("catalog");
+    let catalog = Catalog::new(vec![instance(&server, ApiVersion::new(2, 10))]).expect("catalog");
     let error = catalog.search_tracks("x").await.expect_err("should fail");
     assert!(matches!(error, ApiError::AllInstancesFailed(_)));
     assert!(error.to_string().contains("every catalog instance failed"));
@@ -120,8 +126,11 @@ async fn a_resource_no_instance_has_is_reported_as_missing() {
             .await;
     }
 
-    let catalog =
-        Catalog::new(vec![instance(&first, 2.10), instance(&second, 2.10)]).expect("catalog");
+    let catalog = Catalog::new(vec![
+        instance(&first, ApiVersion::new(2, 10)),
+        instance(&second, ApiVersion::new(2, 10)),
+    ])
+    .expect("catalog");
     let error = catalog.track(1).await.expect_err("should fail");
     assert!(matches!(error, ApiError::NotFound), "{error}");
 }
@@ -139,8 +148,11 @@ async fn an_instance_that_does_not_serve_a_route_falls_through_to_one_that_does(
         .mount(&serving)
         .await;
 
-    let catalog =
-        Catalog::new(vec![instance(&stranger, 2.10), instance(&serving, 2.10)]).expect("catalog");
+    let catalog = Catalog::new(vec![
+        instance(&stranger, ApiVersion::new(2, 10)),
+        instance(&serving, ApiVersion::new(2, 10)),
+    ])
+    .expect("catalog");
     let tracks = catalog.search_tracks("test").await.expect("tracks");
     assert_eq!(tracks.len(), 1);
 }
@@ -163,7 +175,11 @@ async fn recommendations_skip_instances_below_the_required_version() {
         .mount(&new)
         .await;
 
-    let catalog = Catalog::new(vec![instance(&old, 2.2), instance(&new, 2.6)]).expect("catalog");
+    let catalog = Catalog::new(vec![
+        instance(&old, ApiVersion::new(2, 2)),
+        instance(&new, ApiVersion::new(2, 6)),
+    ])
+    .expect("catalog");
     let tracks = catalog.recommendations(1).await.expect("recommendations");
     assert_eq!(tracks[0].id, 7);
 }
@@ -651,6 +667,97 @@ async fn deezer_takes_over_when_playback_has_no_credential() {
 }
 
 #[tokio::test]
+async fn a_stream_that_measured_its_own_loudness_carries_it_back() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([{
+            "kind": "audio",
+            "delivery": "direct",
+            "source": "amazon",
+            "url": "https://cdn.example/track.mp4",
+            "replay_gain": {
+                "track_gain_db": null,
+                "track_peak": null,
+                "program_loudness_lufs": -19.4
+            }
+        }]))))
+        .mount(&server)
+        .await;
+
+    let resolver = playback_resolver(&server);
+    resolver.cache_jwt("a-session".into());
+    let handle = resolver
+        .resolve(&sample_track(), Quality::Lossless)
+        .await
+        .expect("resolved");
+
+    let measured = handle.loudness.expect("the stream measured itself");
+    assert!((measured.gain_db - 1.4).abs() < 0.001, "{measured:?}");
+
+    let mut track = sample_track();
+    track.replay_gain = Some(-4.59);
+    track.peak = Some(0.551);
+    assert_eq!(
+        handle.levelling(&track),
+        (Some(measured.gain_db), Some(0.551))
+    );
+}
+
+#[tokio::test]
+async fn a_healthy_deezer_reports_how_many_accounts_it_still_has() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "accounts": { "total": 46, "available": 12, "dead": 34 }
+        })))
+        .mount(&server)
+        .await;
+
+    let mut config = StreamConfig::with_defaults();
+    config.deezer_url = server.uri();
+    let resolver = StreamResolver::new(config).expect("resolver");
+    let report = resolver.deezer_health().await.expect("health");
+    assert!(report.ok);
+    assert_eq!(report.accounts.available, 12);
+    assert_eq!(report.accounts.total, 46);
+}
+
+#[tokio::test]
+async fn a_deezer_with_no_accounts_left_is_not_reported_as_healthy() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": false,
+            "accounts": { "total": 46, "available": 0, "dead": 46 }
+        })))
+        .mount(&server)
+        .await;
+
+    let mut config = StreamConfig::with_defaults();
+    config.deezer_url = server.uri();
+    let resolver = StreamResolver::new(config).expect("resolver");
+    let report = resolver.deezer_health().await.expect("health");
+    assert!(!report.ok);
+    assert_eq!(report.accounts.available, 0);
+}
+
+#[tokio::test]
+async fn a_deezer_that_is_switched_off_is_not_even_asked() {
+    let mut config = StreamConfig::with_defaults();
+    config.deezer_enabled = false;
+    config.deezer_url = "https://deezer.invalid".into();
+    let resolver = StreamResolver::new(config).expect("resolver");
+    assert!(matches!(
+        resolver.deezer_health().await,
+        Err(ApiError::NoSourceEnabled)
+    ));
+}
+
+#[tokio::test]
 async fn a_dead_deezer_gateway_is_reported() {
     let server = MockServer::start().await;
     Mock::given(method("HEAD"))
@@ -801,7 +908,7 @@ async fn a_search_that_reached_nothing_is_reported_rather_than_looking_empty() {
         .mount(&dead)
         .await;
 
-    let catalog = Catalog::new(vec![instance(&dead, 2.10)]).expect("catalog");
+    let catalog = Catalog::new(vec![instance(&dead, ApiVersion::new(2, 10))]).expect("catalog");
     let error = catalog
         .search("test")
         .await
@@ -824,7 +931,7 @@ async fn a_search_section_that_fails_alone_does_not_sink_the_whole_query() {
         .mount(&server)
         .await;
 
-    let catalog = Catalog::new(vec![instance(&server, 2.10)]).expect("catalog");
+    let catalog = Catalog::new(vec![instance(&server, ApiVersion::new(2, 10))]).expect("catalog");
     let results = catalog.search("test").await.expect("the tracks came back");
     assert_eq!(results.tracks.len(), 1);
     assert!(results.albums.is_empty());
