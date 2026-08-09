@@ -25,20 +25,17 @@ pub(crate) fn http_client(timeout: std::time::Duration) -> reqwest::Result<reqwe
 }
 
 pub fn is_transport_allowed(url: &str) -> bool {
-    if url.starts_with("https://") {
-        return true;
-    }
-    let Some(rest) = url.strip_prefix("http://") else {
+    let Ok(parsed) = reqwest::Url::parse(url.trim()) else {
         return false;
     };
-    let host = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        .rsplit_once(':')
-        .map(|(host, _)| host)
-        .unwrap_or(rest.split(['/', '?', '#']).next().unwrap_or_default());
-    matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1")
+    match parsed.scheme() {
+        "https" => true,
+        "http" => matches!(
+            parsed.host_str(),
+            Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
+        ),
+        _ => false,
+    }
 }
 
 pub use auth::{AuthClient, User};
@@ -73,5 +70,37 @@ mod transport_tests {
     fn a_hostname_that_merely_contains_localhost_is_refused() {
         assert!(!is_transport_allowed("http://localhost.evil.com"));
         assert!(!is_transport_allowed("http://notlocalhost"));
+    }
+
+    #[test]
+    fn a_loopback_address_hidden_in_the_user_part_fools_nobody() {
+        assert!(
+            !is_transport_allowed("http://127.0.0.1:8080@evil.com/"),
+            "everything before the @ is a username, the request goes to evil.com"
+        );
+        assert!(!is_transport_allowed("http://localhost@evil.com/"));
+        assert!(!is_transport_allowed("http://127.0.0.1@evil.com"));
+        assert!(!is_transport_allowed("http://user:pass@evil.com/"));
+    }
+
+    #[test]
+    fn a_real_host_behind_a_user_part_is_judged_on_its_own_merits() {
+        assert!(is_transport_allowed("http://evil.com:80@127.0.0.1/"));
+        assert!(is_transport_allowed("https://user:pass@example.com/"));
+    }
+
+    #[test]
+    fn loopback_over_ipv6_is_allowed_with_or_without_a_port() {
+        assert!(is_transport_allowed("http://[::1]:8080/"));
+        assert!(is_transport_allowed("http://[::1]/"));
+    }
+
+    #[test]
+    fn something_that_is_not_a_url_at_all_is_refused() {
+        assert!(!is_transport_allowed(""));
+        assert!(!is_transport_allowed("   "));
+        assert!(!is_transport_allowed("example.com"));
+        assert!(!is_transport_allowed("http://"));
+        assert!(!is_transport_allowed("javascript:alert(1)"));
     }
 }

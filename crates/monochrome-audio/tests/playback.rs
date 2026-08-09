@@ -152,6 +152,90 @@ fn serve_json(status: u16, body: &'static str) -> Serving {
     }
 }
 
+fn serve_but_refuse_head(body: Vec<u8>) -> Serving {
+    let server = tiny_http::Server::http("127.0.0.1:0").expect("server binds");
+    let port = server.server_addr().to_ip().expect("ip address").port();
+    let handle = std::thread::spawn(move || {
+        for request in server.incoming_requests() {
+            let response = if request.method() == &tiny_http::Method::Head {
+                tiny_http::Response::from_string("<html><body>no HEAD here</body></html>")
+                    .with_status_code(405)
+                    .with_header(
+                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html"[..])
+                            .expect("header"),
+                    )
+                    .boxed()
+            } else {
+                tiny_http::Response::from_data(body.clone()).boxed()
+            };
+            let _ = request.respond(response);
+        }
+    });
+    Serving {
+        url: format!("http://127.0.0.1:{port}/audio.wav"),
+        _handle: handle,
+    }
+}
+
+#[test]
+fn a_source_that_refuses_head_is_still_played() {
+    let serving = serve_but_refuse_head(wav(44_100, 2, 44_100 / 4));
+    let (player, events) = Player::spawn();
+    player.set_volume(0.0);
+    player.play(PlayRequest {
+        url: serving.url.clone(),
+        headers: Vec::new(),
+        replay_gain: None,
+        peak: None,
+        decryption_key: None,
+    });
+
+    match wait_for_start(&events, Duration::from_secs(20)) {
+        Some(Ok(())) => {}
+        Some(Err(reason)) if reason.contains("audio") && reason.contains("device") => {}
+        Some(Err(reason)) => {
+            panic!("a HEAD the cdn will not serve must not stop playback: {reason}")
+        }
+        None => panic!("the track should have started"),
+    }
+}
+
+fn serve_ignoring_ranges(body: Vec<u8>) -> Serving {
+    let server = tiny_http::Server::http("127.0.0.1:0").expect("server binds");
+    let port = server.server_addr().to_ip().expect("ip address").port();
+    let handle = std::thread::spawn(move || {
+        for request in server.incoming_requests() {
+            let response = tiny_http::Response::from_data(body.clone()).with_header(
+                tiny_http::Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..])
+                    .expect("header"),
+            );
+            let _ = request.respond(response);
+        }
+    });
+    Serving {
+        url: format!("http://127.0.0.1:{port}/audio.wav"),
+        _handle: handle,
+    }
+}
+
+#[test]
+fn a_source_that_promises_ranges_and_then_ignores_one_is_refused() {
+    use monochrome_audio::source::{ByteRange, HttpRange};
+
+    let serving = serve_ignoring_ranges(wav(44_100, 2, 4_410));
+    let backend = HttpRange::open(&serving.url, &[]).expect("the source opens");
+    assert!(backend.supports_ranges(), "the server promised ranges");
+    assert!(backend.open_at(0).is_ok());
+
+    let Err(error) = backend.open_at(1024) else {
+        panic!("replaying the file from the start would sound like corruption");
+    };
+    assert!(
+        error.to_string().contains("range"),
+        "the reason should name the range request, got: {error}"
+    );
+}
+
 fn failure_for(url: String) -> String {
     let (player, events) = Player::spawn();
     player.play(PlayRequest {

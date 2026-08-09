@@ -324,6 +324,211 @@ fn a_track_that_started_on_its_own_still_gives_way_to_the_next() {
 }
 
 #[test]
+fn muting_a_volume_that_is_already_down_says_so_rather_than_pretending() {
+    let mut app = App::with_clock(Quality::Lossless, 0.0, clock);
+    app.toggle_mute();
+    assert_eq!(app.status.as_deref(), Some("the volume is already down"));
+    app.toggle_mute();
+    assert_eq!(
+        app.status.as_deref(),
+        Some("the volume is already down"),
+        "there is nothing stored to unmute back to, and saying unmuted would be a lie"
+    );
+    assert_eq!(app.volume, 0.0);
+}
+
+#[test]
+fn the_filter_reaches_inside_an_album_you_opened() {
+    let mut app = app();
+    let mut wanted = track(9);
+    wanted.title = "Sardunyaya Ağıt".into();
+    app.push(Screen::Album(album(1, vec![track(1), wanted, track(2)])));
+    app.cursor_to_start();
+    assert_eq!(app.rows().len(), 3);
+
+    app.filter = "sardunya".into();
+    let rows = app.rows();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the help promises / filters the list you are on, and an album is a list"
+    );
+    assert!(matches!(&rows[0], Row::Track(track) if track.id == 9));
+}
+
+#[test]
+fn the_filter_reaches_inside_a_playlist_and_an_artist_page_too() {
+    let mut app = app();
+    let mut wanted = track(9);
+    wanted.title = "Sardunyaya Ağıt".into();
+    app.push(Screen::Playlist(
+        playlist("p1"),
+        vec![track(1), wanted.clone()],
+    ));
+    app.filter = "sardunya".into();
+    assert_eq!(app.rows().len(), 1);
+    app.pop();
+
+    app.push(Screen::Artist(Box::new(ArtistPage {
+        artist: artist(7),
+        albums: vec![album(1, Vec::new())],
+        top_tracks: vec![track(1), wanted],
+    })));
+    let rows = app.rows();
+    assert!(
+        rows.iter()
+            .all(|row| matches!(row, Row::Track(track) if track.id == 9)),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn a_screen_that_is_still_loading_is_not_filtered_away() {
+    let mut app = app();
+    app.filter = "sardunya".into();
+    app.push(Screen::Loading("something".into()));
+    assert_eq!(app.rows(), vec![Row::Empty("loading".into())]);
+}
+
+#[test]
+fn a_track_on_repeat_that_will_not_play_is_left_behind_rather_than_hammered() {
+    let mut app = app();
+    app.push(Screen::Album(album(1, vec![track(1), track(2)])));
+    app.cursor_to_start();
+    app.open_selected();
+    app.cycle_repeat();
+    app.cycle_repeat();
+    assert_eq!(app.repeat(), monochrome_core::Repeat::One);
+    app.apply(Message::PlaybackFinished);
+    assert_eq!(app.queue.current().expect("current").id, 1);
+
+    app.apply(Message::PlaybackFailed("no source".into()));
+    assert_eq!(
+        app.queue.current().expect("current").id,
+        2,
+        "repeat one must not ask the gateway for the same broken track forever"
+    );
+}
+
+#[test]
+fn a_queue_of_tracks_that_all_refuse_to_play_stops_instead_of_running_on() {
+    let mut app = app();
+    let tracks: Vec<Track> = (1..=20).map(track).collect();
+    app.push(Screen::Album(album(1, tracks)));
+    app.cursor_to_start();
+    app.open_selected();
+    app.apply(Message::PlaybackFinished);
+
+    let mut attempts = 0;
+    let mut effects = app.apply(Message::PlaybackFailed("no source".into()));
+    while !effects.is_empty() {
+        attempts += 1;
+        assert!(attempts < 50, "the client never gave up");
+        effects = app.apply(Message::PlaybackFailed("no source".into()));
+    }
+    assert!(app.now.track.is_none());
+    assert_eq!(
+        app.status.as_deref(),
+        Some("stopped after 5 tracks in a row would not play")
+    );
+    assert!(attempts < GIVE_UP_AFTER as usize);
+}
+
+#[test]
+fn a_track_that_plays_forgives_the_failures_before_it() {
+    let mut app = app();
+    let tracks: Vec<Track> = (1..=20).map(track).collect();
+    app.push(Screen::Album(album(1, tracks)));
+    app.cursor_to_start();
+    app.open_selected();
+    app.apply(Message::PlaybackFinished);
+
+    for _ in 0..3 {
+        app.apply(Message::PlaybackFailed("no source".into()));
+    }
+    app.apply(Message::PlaybackStarted {
+        duration: Some(200.0),
+        format: "flac".into(),
+    });
+    for _ in 0..3 {
+        let effects = app.apply(Message::PlaybackFailed("no source".into()));
+        assert!(
+            !effects.is_empty(),
+            "a run of failures that was broken by a track playing must not count against it"
+        );
+    }
+}
+
+#[test]
+fn a_spent_browser_check_can_be_asked_for_again() {
+    let mut app = app();
+    app.push(Screen::Album(album(1, vec![track(1)])));
+    app.cursor_to_start();
+    app.open_selected();
+
+    app.apply(Message::NeedsVerification("http://localhost:1/?n=x".into()));
+    assert_eq!(
+        app.ask_again_for_verification(),
+        vec![Effect::OpenBrowser],
+        "while the bridge is up, enter reopens the tab"
+    );
+
+    app.apply(Message::VerificationFailed("turnstile 1102".into()));
+    assert!(
+        app.verification_url.is_none(),
+        "a dead bridge must not be offered as a working address"
+    );
+    let effects = app.ask_again_for_verification();
+    assert!(
+        matches!(effects.first(), Some(Effect::Play(_))),
+        "there has to be a way back to a fresh check, got {effects:?}"
+    );
+}
+
+#[test]
+fn a_sync_the_server_refused_is_kept_rather_than_thrown_away() {
+    let mut app = app();
+    app.push(Screen::Album(album(1, vec![track(1)])));
+    app.cursor_to_start();
+    app.toggle_favorite();
+    assert!(app.library.is_favorite(FavoriteKind::Track, "1"));
+
+    let sent = app.library.take_dirty();
+    let fields: Vec<_> = sent.iter().map(|(field, _)| *field).collect();
+    assert!(!fields.is_empty());
+    app.apply(Message::SyncRejected(fields));
+
+    assert!(
+        !app.library.dirty_fields().is_empty(),
+        "a change the server never took must stay pending, or the next sign in erases it"
+    );
+    app.library
+        .merge_remote(monochrome_core::library::SyncDocument::default());
+    assert!(
+        app.library.is_favorite(FavoriteKind::Track, "1"),
+        "the server's older copy overwrote a change that was never delivered"
+    );
+}
+
+#[test]
+fn signing_out_asks_before_it_takes_everything_away() {
+    let mut app = app();
+    assert!(
+        app.sign_out().is_empty(),
+        "signing out while signed out does nothing"
+    );
+
+    app.apply(Message::SignedIn(Box::new(monochrome_api::auth::User {
+        id: "u1".into(),
+        email: Some("me@x.co".into()),
+        name: None,
+    })));
+    assert!(app.sign_out().is_empty(), "one keypress must not be enough");
+    assert_eq!(app.status.as_deref(), Some("press X again to sign out"));
+    assert_eq!(app.sign_out(), vec![Effect::SignOut]);
+}
+
+#[test]
 fn a_failure_on_the_last_track_clears_the_player() {
     let mut app = app();
     app.push(Screen::Album(album(1, vec![track(1)])));

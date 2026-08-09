@@ -3,6 +3,8 @@ use std::time::Duration;
 use symphonia::core::io::MediaSource;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+const PREVIEW_BYTES: u64 = 800;
 
 pub trait ByteRange: Send + Sync {
     fn total_len(&self) -> Option<u64>;
@@ -29,6 +31,10 @@ impl RangeSource {
             position: 0,
             length,
         }
+    }
+
+    pub fn prime(&mut self) -> IoResult<()> {
+        self.ready_reader().map(|_| ())
     }
 
     fn ready_reader(&mut self) -> IoResult<&mut Box<dyn Read + Send + Sync>> {
@@ -145,30 +151,35 @@ impl HttpRange {
             .build()
             .map_err(to_io)?;
 
-        let mut probe = client.head(url);
+        let mut probe = client.head(url).timeout(PROBE_TIMEOUT);
         for (key, value) in headers {
             probe = probe.header(key.as_str(), value.as_str());
         }
         let response = probe.send().map_err(to_io)?;
+
+        if !response.status().is_success() {
+            return Ok(Self {
+                client,
+                url: url.to_string(),
+                headers: headers.to_vec(),
+                length: None,
+                ranges: false,
+                content_type: None,
+            });
+        }
 
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-
-        let (length, ranges) = if response.status().is_success() {
-            let length = response.content_length().filter(|len| *len > 0);
-            let ranges = response
-                .headers()
-                .get(reqwest::header::ACCEPT_RANGES)
-                .and_then(|value| value.to_str().ok())
-                .map(|value| value.contains("bytes"))
-                .unwrap_or(false);
-            (length, ranges)
-        } else {
-            (None, false)
-        };
+        let length = response.content_length().filter(|len| *len > 0);
+        let ranges = response
+            .headers()
+            .get(reqwest::header::ACCEPT_RANGES)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.contains("bytes"))
+            .unwrap_or(false);
 
         Ok(Self {
             client,
@@ -178,6 +189,23 @@ impl HttpRange {
             ranges,
             content_type,
         })
+    }
+
+    pub fn preview(&self) -> Option<String> {
+        let mut request = self.client.get(&self.url).timeout(PROBE_TIMEOUT);
+        for (key, value) in &self.headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+        let mut response = match request.send() {
+            Ok(response) => response,
+            Err(error) => return Some(error.to_string()),
+        };
+        let mut body = String::new();
+        let _ = std::io::Read::read_to_string(
+            &mut std::io::Read::take(&mut response, PREVIEW_BYTES),
+            &mut body,
+        );
+        summarise(&body)
     }
 }
 
@@ -215,6 +243,11 @@ impl ByteRange for HttpRange {
                 Some(detail) => format!("the audio source answered {status}: {detail}"),
                 None => format!("the audio source answered {status}"),
             }));
+        }
+        if offset > 0 && status != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(std::io::Error::other(format!(
+                "the audio source ignored the range request and answered {status} from the start"
+            )));
         }
         Ok(Box::new(response))
     }

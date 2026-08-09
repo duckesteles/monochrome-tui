@@ -26,6 +26,9 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
     if !matches!(action, Action::None) {
         app.status = None;
     }
+    if !matches!(action, Action::SignOut | Action::None) {
+        app.confirming_sign_out = false;
+    }
 
     match action {
         Action::Quit => vec![Effect::Quit],
@@ -105,7 +108,7 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
             Vec::new()
         }
         Action::FocusSearch => {
-            app.focus = if app.tab == Tab::Search {
+            app.focus = if app.tab == Tab::Search && app.stack.is_empty() {
                 Focus::SearchInput
             } else {
                 Focus::FilterInput
@@ -118,6 +121,7 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
             Vec::new()
         }
         Action::Radio => app.start_radio(),
+        Action::SignOut => app.sign_out(),
         Action::Insert(character) => {
             match app.focus {
                 Focus::SearchInput => app.search_input.push(character),
@@ -162,7 +166,7 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
             Vec::new()
         }
         Action::Submit => match app.focus {
-            Focus::Verification => vec![Effect::OpenBrowser],
+            Focus::Verification => app.ask_again_for_verification(),
             Focus::SearchInput => app.submit_search(),
             Focus::FilterInput => {
                 app.focus = Focus::Browsing;
@@ -194,7 +198,6 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
             }
             Vec::new()
         }
-        Action::OpenBrowser => vec![Effect::OpenBrowser],
         Action::None => Vec::new(),
     }
 }
@@ -264,6 +267,42 @@ mod tests {
         assert_eq!(app.search_input, "daf");
         let effects = press(&mut app, KeyCode::Enter);
         assert_eq!(effects, vec![Effect::Search("daf".into())]);
+    }
+
+    #[test]
+    fn slash_inside_something_you_opened_from_a_search_filters_it() {
+        let mut app = app();
+        app.switch_tab(Tab::Search);
+        app.push(Screen::Album(monochrome_core::model::Album {
+            id: 1,
+            title: "Discovery".into(),
+            cover: None,
+            release_date: None,
+            artist: None,
+            number_of_tracks: Some(0),
+            duration: None,
+            explicit: false,
+            quality: Quality::Lossless,
+            album_type: None,
+            copyright: None,
+            tracks: Vec::new(),
+        }));
+
+        press(&mut app, KeyCode::Char('/'));
+        assert_eq!(
+            app.focus,
+            Focus::FilterInput,
+            "a new catalogue search would throw away the screen you are standing on"
+        );
+
+        press(&mut app, KeyCode::Esc);
+        app.pop();
+        press(&mut app, KeyCode::Char('/'));
+        assert_eq!(
+            app.focus,
+            Focus::SearchInput,
+            "back at the results, slash reaches the catalogue again"
+        );
     }
 
     #[test]

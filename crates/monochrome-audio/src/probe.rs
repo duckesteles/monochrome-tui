@@ -50,7 +50,16 @@ pub fn top_level_boxes(bytes: &[u8]) -> Vec<BoxInfo> {
             size,
             truncated,
         });
-        offset += size as usize;
+        if truncated {
+            break;
+        }
+        let Some(next) = usize::try_from(size)
+            .ok()
+            .and_then(|size| offset.checked_add(size))
+        else {
+            break;
+        };
+        offset = next;
     }
     boxes
 }
@@ -218,6 +227,20 @@ mod tests {
         data.extend(mp4_box(b"moof", 40));
         data.extend(mp4_box(b"mdat", 100));
         assert_eq!(describe(&data), "fragmented mp4 without its init segment");
+    }
+
+    #[test]
+    fn a_box_claiming_the_whole_address_space_does_not_run_the_offset_off_the_end() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(b"moof");
+        data.extend_from_slice(&u64::MAX.to_be_bytes());
+        data.extend_from_slice(&[0u8; 64]);
+
+        let boxes = top_level_boxes(&data);
+        assert_eq!(boxes.len(), 1);
+        assert!(boxes[0].truncated);
+        assert_eq!(boxes[0].size, u64::MAX);
     }
 
     #[test]
