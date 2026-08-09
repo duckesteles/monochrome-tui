@@ -85,11 +85,28 @@ impl Spill {
         self.progress.drained.load(Ordering::Acquire)
     }
 
+    pub fn broke(&self) -> bool {
+        self.is_complete() && self.progress.failed.load(Ordering::Acquire)
+    }
+
+    fn cut_short(&self) -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            "the audio source stopped part way through",
+        )
+    }
+
     fn wait_for(&self, offset: u64) -> IoResult<u64> {
         let deadline = std::time::Instant::now() + STALL_LIMIT;
         loop {
             let written = self.buffered();
-            if written > offset || self.is_complete() {
+            if written > offset {
+                return Ok(written);
+            }
+            if self.is_complete() {
+                if self.broke() {
+                    return Err(self.cut_short());
+                }
                 return Ok(written);
             }
             if std::time::Instant::now() >= deadline {
@@ -135,6 +152,9 @@ impl Seek for Spill {
                     }
                     std::thread::sleep(WAIT);
                 }
+                if self.broke() {
+                    return Err(self.cut_short());
+                }
                 self.buffered() as i128 + delta as i128
             }
         };
@@ -151,11 +171,11 @@ impl Seek for Spill {
 
 impl MediaSource for Spill {
     fn is_seekable(&self) -> bool {
-        self.is_complete()
+        self.is_complete() && !self.broke()
     }
 
     fn byte_len(&self) -> Option<u64> {
-        self.is_complete().then(|| self.buffered())
+        self.is_seekable().then(|| self.buffered())
     }
 }
 
@@ -413,6 +433,60 @@ mod tests {
         let mut out = Vec::new();
         spill.read_to_end(&mut out).expect("drain");
         assert_eq!(spill.read(&mut [0u8; 8]).expect("eof"), 0);
+    }
+
+    struct BreakingSource {
+        before_the_break: usize,
+    }
+
+    impl Read for BreakingSource {
+        fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+            if self.before_the_break == 0 {
+                return Err(std::io::Error::other("the connection went away"));
+            }
+            let take = buffer.len().min(self.before_the_break);
+            buffer[..take].fill(1);
+            self.before_the_break -= take;
+            Ok(take)
+        }
+    }
+
+    fn broken(before_the_break: usize) -> Spill {
+        let scratch = Scratch::new();
+        let spill =
+            Spill::new_in(&scratch.directory, BreakingSource { before_the_break }).expect("spill");
+        while !spill.is_complete() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        spill
+    }
+
+    #[test]
+    fn a_fetch_that_died_part_way_is_reported_rather_than_passed_off_as_the_end() {
+        let mut spill = broken(5000);
+        let mut out = Vec::new();
+        let error = spill
+            .read_to_end(&mut out)
+            .expect_err("a truncated download must not read as a clean end of file");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionAborted,
+            "an unexpected end of file is how a decoder is told a track finished cleanly"
+        );
+        assert_eq!(out.len(), 5000, "what did arrive is still handed over");
+    }
+
+    #[test]
+    fn a_broken_fetch_does_not_advertise_a_length_it_never_reached() {
+        let spill = broken(1024);
+        assert!(!spill.is_seekable());
+        assert_eq!(spill.byte_len(), None);
+    }
+
+    #[test]
+    fn seeking_to_the_end_of_a_broken_fetch_is_refused() {
+        let mut spill = broken(1024);
+        assert!(spill.seek(SeekFrom::End(-1)).is_err());
     }
 
     #[test]

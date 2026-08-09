@@ -21,7 +21,7 @@ pub struct SyncDocument {
     pub user_folders: Value,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncField {
     Library,
     History,
@@ -93,6 +93,12 @@ impl Library {
                     self.document.user_folders = previous.user_folders.clone()
                 }
             }
+        }
+    }
+
+    pub fn mark_dirty(&mut self, fields: &[SyncField]) {
+        for field in fields {
+            self.mark(*field);
         }
     }
 

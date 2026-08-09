@@ -66,12 +66,13 @@ Press `?` in the app. The short version:
 | `j` `k`, arrows | move |
 | `enter` | play or open |
 | `esc` | back |
-| `/` | search |
+| `/` | search the catalogue, or filter the list you are on |
 | `space` | pause |
 | `←` `→` | seek |
 | `+` `-` | volume |
 | `s` | shuffle |
 | `f` | save to library |
+| `X` | sign out, press twice |
 | `Q` | quit |
 
 ## When something is wrong

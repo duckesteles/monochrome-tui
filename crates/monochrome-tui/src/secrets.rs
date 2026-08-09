@@ -15,6 +15,7 @@ enum Request {
 pub struct Secrets {
     fallback: PathBuf,
     worker: std::sync::Mutex<Option<std::sync::mpsc::Sender<Request>>>,
+    rewriting: std::sync::Mutex<()>,
 }
 
 impl Secrets {
@@ -27,6 +28,7 @@ impl Secrets {
         Self {
             fallback,
             worker: std::sync::Mutex::new(spawned.ok().map(|_| sender)),
+            rewriting: std::sync::Mutex::new(()),
         }
     }
 
@@ -97,6 +99,7 @@ impl Secrets {
     }
 
     fn write_fallback(&self, key: &str, value: Option<&str>) -> Result<()> {
+        let _alone = self.rewriting.lock().expect("rewriting");
         let mut entries = self.entries();
         entries.retain(|(name, _)| name != key);
         if let Some(value) = value {

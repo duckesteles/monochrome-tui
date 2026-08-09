@@ -31,6 +31,7 @@ pub const RECOMMENDATIONS_SINCE: ApiVersion = ApiVersion::new(2, 4);
 
 const ALBUM_PAGE: u32 = 500;
 const MAX_COLLECTED_TRACKS: u32 = 10_000;
+const MAX_PAGES: usize = 128;
 
 const CACHE_ENTRIES: usize = 128;
 const CACHE_BYTES: usize = 4 * 1024 * 1024;
@@ -129,9 +130,17 @@ pub struct Catalog {
 
 impl Catalog {
     pub fn new(instances: Vec<Instance>) -> ApiResult<Self> {
+        let asked = instances.len();
         let instances: Vec<Instance> = instances.into_iter().filter(Instance::is_secure).collect();
         if instances.is_empty() {
-            return Err(ApiError::NoInstances);
+            return Err(match asked {
+                0 => ApiError::NoInstances,
+                _ => ApiError::Network(
+                    "every catalog instance is named over plaintext and off this machine, which \
+                     would put your searches on the wire"
+                        .into(),
+                ),
+            });
         }
         let client = crate::http_client(REQUEST_TIMEOUT)?;
         Ok(Self {
@@ -358,7 +367,10 @@ impl Catalog {
             .min(MAX_COLLECTED_TRACKS) as usize;
         let mut opened_with = album.tracks.first().map(|track| track.id);
 
-        while album.tracks.len() < wanted {
+        for _ in 0..MAX_PAGES {
+            if album.tracks.len() >= wanted {
+                break;
+            }
             let offset = album.tracks.len();
             let page: Envelope<WireAlbum> = self
                 .fetch_json(
@@ -426,7 +438,10 @@ impl Catalog {
             .min(MAX_COLLECTED_TRACKS) as usize;
         let mut opened_with = tracks.first().map(|track| track.id);
 
-        while tracks.len() < wanted {
+        for _ in 0..MAX_PAGES {
+            if tracks.len() >= wanted {
+                break;
+            }
             let offset = tracks.len();
             let page: PlaylistEnvelope = self
                 .fetch_wrapped_or_bare(&format!("/playlist/?id={id}&offset={offset}"))
@@ -517,7 +532,23 @@ mod tests {
             "http://insecure.example",
             ApiVersion::new(2, 0),
         )]);
-        assert!(matches!(error, Err(ApiError::NoInstances)));
+        let message = error
+            .err()
+            .expect("a plaintext instance must be refused")
+            .to_string();
+        assert!(
+            message.contains("plaintext"),
+            "an instance that was refused must not be reported as one that was never configured: \
+             {message}"
+        );
+    }
+
+    #[test]
+    fn an_empty_list_says_so_rather_than_blaming_the_transport() {
+        assert!(matches!(
+            Catalog::new(Vec::new()),
+            Err(ApiError::NoInstances)
+        ));
     }
 
     #[test]

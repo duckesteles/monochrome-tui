@@ -184,7 +184,7 @@ async fn run(paths: Paths) -> Result<()> {
 
     let mut app = App::new(config.quality(), config.volume());
     app.roomy_rows = config.roomy_rows();
-    app.library = monochrome_core::Library::new(load_snapshot(&paths));
+    app.library = load_snapshot(&paths);
 
     match services.secrets.get(SESSION_TOKEN) {
         Some(token) => restore_account(services.clone(), token, messages.clone()),
@@ -202,10 +202,15 @@ async fn run(paths: Paths) -> Result<()> {
     let mut bridge_offered = false;
     let mut scheduler = SyncScheduler::new(SYNC_DEBOUNCE);
     let mut redraw = true;
+    let mut trouble = None;
 
     loop {
         if redraw {
-            terminal.draw(|frame| views::render(frame, &app, &theme, &mut list))?;
+            if let Err(error) = terminal.draw(|frame| views::render(frame, &app, &theme, &mut list))
+            {
+                trouble = Some(error);
+                break;
+            }
             redraw = false;
         }
 
@@ -233,10 +238,11 @@ async fn run(paths: Paths) -> Result<()> {
                     }
                     match &message {
                         Message::NeedsVerification(_) => bridge_offered = true,
-                        Message::Verified => bridge_offered = false,
+                        Message::Verified | Message::VerificationFailed(_) => bridge_offered = false,
                         _ => {}
                     }
-                    let arrived_from_server = matches!(message, Message::Sync(_));
+                    let arrived_from_server =
+                        matches!(message, Message::Sync(_) | Message::SyncRejected(_));
                     let signed_out = matches!(message, Message::SignedOut);
                     let effects = app.apply(message);
                     if arrived_from_server {
@@ -297,7 +303,10 @@ async fn run(paths: Paths) -> Result<()> {
         let _ = config.save(&paths.config);
     }
     leave_terminal(terminal)?;
-    Ok(())
+    match trouble {
+        Some(error) => Err(error).context("the terminal stopped accepting output"),
+        None => Ok(()),
+    }
 }
 
 fn perform(
@@ -527,16 +536,17 @@ fn push_sync(
     paths: &Paths,
 ) {
     save_snapshot(app, paths);
-    let changes = app.library.take_dirty();
-    if changes.is_empty() {
+    if app.library.dirty_fields().is_empty() {
         return;
     }
     let Some(token) = services.secrets.get(SESSION_TOKEN) else {
         return;
     };
+    let changes = app.library.take_dirty();
     app.syncing = true;
     let services = services.clone();
     let messages = messages.clone();
+    let fields: Vec<_> = changes.iter().map(|(field, _)| *field).collect();
     tokio::spawn(async move {
         match services.auth.push_sync(&token, &changes).await {
             Ok(document) => {
@@ -546,7 +556,10 @@ fn push_sync(
                 services.secrets.clear(SESSION_TOKEN);
                 let _ = messages.send(Message::SignedOut);
             }
-            Err(error) => report(&messages, error),
+            Err(error) => {
+                let _ = messages.send(Message::SyncRejected(fields));
+                report(&messages, error);
+            }
         }
     });
 }
@@ -580,10 +593,30 @@ fn report(messages: &UnboundedSender<Message>, error: ApiError) {
     let _ = messages.send(Message::Failure(secrets::redact(&error.to_string())));
 }
 
-fn load_snapshot(paths: &Paths) -> monochrome_core::SyncDocument {
-    std::fs::read_to_string(&paths.snapshot)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
+#[derive(serde::Deserialize)]
+struct Snapshot {
+    document: monochrome_core::SyncDocument,
+    #[serde(default)]
+    pending: Vec<monochrome_core::library::SyncField>,
+}
+
+#[derive(serde::Serialize)]
+struct Saving<'a> {
+    document: &'a monochrome_core::SyncDocument,
+    pending: &'a [monochrome_core::library::SyncField],
+}
+
+fn load_snapshot(paths: &Paths) -> monochrome_core::Library {
+    let Ok(raw) = std::fs::read_to_string(&paths.snapshot) else {
+        return monochrome_core::Library::default();
+    };
+    if let Ok(saved) = serde_json::from_str::<Snapshot>(&raw) {
+        let mut library = monochrome_core::Library::new(saved.document);
+        library.mark_dirty(&saved.pending);
+        return library;
+    }
+    serde_json::from_str(&raw)
+        .map(monochrome_core::Library::new)
         .unwrap_or_default()
 }
 
@@ -594,25 +627,33 @@ fn forget_everything_local(services: &Arc<Services>, paths: &Paths) {
 }
 
 fn save_snapshot(app: &App, paths: &Paths) {
-    if let Ok(body) = serde_json::to_vec(app.library.document()) {
+    let saving = Saving {
+        document: app.library.document(),
+        pending: app.library.dirty_fields(),
+    };
+    if let Ok(body) = serde_json::to_vec(&saving) {
         let _ = monochrome_tui::paths::write_private(&paths.snapshot, &body);
     }
 }
 
 async fn flush_on_exit(app: &mut App, services: &Arc<Services>, paths: &Paths) {
-    save_snapshot(app, paths);
     let changes = app.library.take_dirty();
-    if changes.is_empty() {
-        return;
-    }
-    let Some(token) = services.secrets.get(SESSION_TOKEN) else {
-        return;
+    let fields: Vec<_> = changes.iter().map(|(field, _)| *field).collect();
+    let delivered = match services.secrets.get(SESSION_TOKEN) {
+        Some(token) if !changes.is_empty() => matches!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                services.auth.push_sync(&token, &changes),
+            )
+            .await,
+            Ok(Ok(_))
+        ),
+        _ => changes.is_empty(),
     };
-    let _ = tokio::time::timeout(
-        Duration::from_secs(5),
-        services.auth.push_sync(&token, &changes),
-    )
-    .await;
+    if !delivered {
+        app.library.mark_dirty(&fields);
+    }
+    save_snapshot(app, paths);
 }
 
 fn forward_audio_events(
@@ -672,4 +713,91 @@ fn leave_terminal(mut terminal: Terminal<Backend>) -> Result<()> {
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use monochrome_core::library::SyncField;
+
+    struct Scratch {
+        directory: std::path::PathBuf,
+    }
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let directory = std::env::temp_dir().join(format!(
+                "monochrome-snapshot-{name}-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&directory);
+            Self { directory }
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    fn paths_in(scratch: &Scratch) -> Paths {
+        Paths {
+            config: scratch.directory.join("config.toml"),
+            snapshot: scratch.directory.join("snapshot.json"),
+            log_dir: scratch.directory.clone(),
+        }
+    }
+
+    fn favouriting(library: &mut monochrome_core::Library) {
+        library.set_favorite_artist(
+            &monochrome_core::model::Artist {
+                id: 7,
+                name: "Artist".into(),
+                picture: None,
+                popularity: None,
+            },
+            true,
+            1_700_000_000_000,
+        );
+    }
+
+    #[test]
+    fn a_change_that_never_reached_the_server_is_still_pending_after_a_restart() {
+        let scratch = Scratch::new("pending");
+        let paths = paths_in(&scratch);
+        let mut app = App::new(monochrome_core::model::Quality::Lossless, 0.7);
+        favouriting(&mut app.library);
+        assert_eq!(app.library.dirty_fields(), &[SyncField::Library]);
+
+        save_snapshot(&app, &paths);
+        let reopened = load_snapshot(&paths);
+        assert_eq!(reopened.dirty_fields(), &[SyncField::Library]);
+        assert!(reopened.is_favorite(monochrome_core::FavoriteKind::Artist, "7"));
+    }
+
+    #[test]
+    fn a_snapshot_written_by_an_older_build_still_opens() {
+        let scratch = Scratch::new("older-snapshot");
+        let paths = paths_in(&scratch);
+        let mut library = monochrome_core::Library::default();
+        favouriting(&mut library);
+        let body = serde_json::to_vec(library.document()).expect("serialise");
+        monochrome_tui::paths::write_private(&paths.snapshot, &body).expect("write");
+
+        let reopened = load_snapshot(&paths);
+        assert!(reopened.is_favorite(monochrome_core::FavoriteKind::Artist, "7"));
+        assert!(reopened.dirty_fields().is_empty());
+    }
+
+    #[test]
+    fn a_missing_snapshot_opens_an_empty_library() {
+        let scratch = Scratch::new("absent-snapshot");
+        let library = load_snapshot(&paths_in(&scratch));
+        assert!(library.dirty_fields().is_empty());
+        assert_eq!(library.history().len(), 0);
+    }
 }

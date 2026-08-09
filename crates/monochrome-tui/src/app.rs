@@ -1,6 +1,6 @@
 use monochrome_api::SearchResults;
 use monochrome_api::auth::User;
-use monochrome_core::library::{HISTORY_THRESHOLD_SECS, SyncDocument};
+use monochrome_core::library::{HISTORY_THRESHOLD_SECS, SyncDocument, SyncField};
 use monochrome_core::model::{Album, Artist, FavoriteKind, Playlist, Quality, Track};
 use monochrome_core::{Library, Queue, Repeat};
 use std::collections::{HashMap, HashSet};
@@ -157,6 +157,7 @@ pub enum Message {
     TrackDetails(Vec<Track>),
     Radio(Vec<Track>),
     Sync(Box<SyncDocument>),
+    SyncRejected(Vec<SyncField>),
     SignedIn(Box<User>),
     SignInFailed(String),
     SignedOut,
@@ -206,9 +207,13 @@ pub struct App {
     pub verification_error: Option<String>,
     pub syncing: bool,
     pub quit: bool,
+    pub confirming_sign_out: bool,
     radio_seed: Option<String>,
+    refusals: u32,
     clock: fn() -> u64,
 }
+
+pub const GIVE_UP_AFTER: u32 = 5;
 
 impl App {
     pub fn new(quality: Quality, volume: f32) -> Self {
@@ -240,7 +245,9 @@ impl App {
             verification_error: None,
             syncing: false,
             quit: false,
+            confirming_sign_out: false,
             radio_seed: None,
+            refusals: 0,
             clock: now_ms,
         }
     }
@@ -286,14 +293,14 @@ impl App {
                 if album.tracks.is_empty() {
                     vec![Row::Empty("this album has no playable tracks".into())]
                 } else {
-                    album.tracks.iter().cloned().map(Row::Track).collect()
+                    self.only_matching(album.tracks.iter().cloned().map(Row::Track).collect())
                 }
             }
             Some(Screen::Playlist(_, tracks)) => {
                 if tracks.is_empty() {
                     vec![Row::Empty("this playlist is empty".into())]
                 } else {
-                    tracks.iter().cloned().map(Row::Track).collect()
+                    self.only_matching(tracks.iter().cloned().map(Row::Track).collect())
                 }
             }
             Some(Screen::Artist(page)) => {
@@ -308,8 +315,9 @@ impl App {
                 }
                 if rows.is_empty() {
                     rows.push(Row::Empty("nothing to show for this artist".into()));
+                    return rows;
                 }
-                rows
+                self.only_matching(rows)
             }
             None => self.root_rows(),
         }
@@ -584,6 +592,7 @@ impl App {
             .unwrap_or(0);
         let seed = (self.clock)();
         self.queue.replace(tracks, start, seed);
+        self.refusals = 0;
         self.start_current(true)
     }
 
@@ -658,13 +667,12 @@ impl App {
                 self.volume = previous;
                 self.status = Some("unmuted".into());
             }
-            None => {
-                if self.volume > 0.0 {
-                    self.muted_from = Some(self.volume);
-                }
+            None if self.volume > 0.0 => {
+                self.muted_from = Some(self.volume);
                 self.volume = 0.0;
                 self.status = Some("muted".into());
             }
+            None => self.status = Some("the volume is already down".into()),
         }
         vec![Effect::Volume(self.volume)]
     }
@@ -712,6 +720,34 @@ impl App {
             1 => format!("queued 1 track{like}"),
             many => format!("queued {many} tracks{like}"),
         });
+    }
+
+    pub fn ask_again_for_verification(&mut self) -> Vec<Effect> {
+        if self.verification_url.is_some() {
+            return vec![Effect::OpenBrowser];
+        }
+        let Some(track) = self.queue.current().cloned() else {
+            self.focus = Focus::Browsing;
+            self.verification_error = None;
+            return Vec::new();
+        };
+        self.verification_error = Some("asking for a fresh check".into());
+        self.refusals = 0;
+        vec![Effect::Play(Box::new(track))]
+    }
+
+    pub fn sign_out(&mut self) -> Vec<Effect> {
+        if !self.signed_in() {
+            self.status = Some("you are not signed in".into());
+            return Vec::new();
+        }
+        if !self.confirming_sign_out {
+            self.confirming_sign_out = true;
+            self.status = Some("press X again to sign out".into());
+            return Vec::new();
+        }
+        self.confirming_sign_out = false;
+        vec![Effect::SignOut]
     }
 
     pub fn toggle_favorite(&mut self) -> Vec<Effect> {
@@ -839,6 +875,11 @@ impl App {
                 self.move_cursor(0);
                 Vec::new()
             }
+            Message::SyncRejected(fields) => {
+                self.syncing = false;
+                self.library.mark_dirty(&fields);
+                Vec::new()
+            }
             Message::SignedIn(user) => {
                 self.user = Some(*user);
                 self.focus = Focus::Browsing;
@@ -877,6 +918,7 @@ impl App {
             }
             Message::VerificationFailed(reason) => {
                 self.verification_error = Some(reason);
+                self.verification_url = None;
                 self.focus = Focus::Verification;
                 Vec::new()
             }
@@ -894,6 +936,7 @@ impl App {
                 self.now.loading = false;
                 self.now.paused = false;
                 self.now.recorded = false;
+                self.refusals = 0;
                 self.now.format = Some(format);
                 if let Some(duration) = duration {
                     self.now.duration = Some(duration);
@@ -912,11 +955,19 @@ impl App {
             Message::PlaybackFailed(reason) => {
                 self.status = Some(reason);
                 self.now.loading = false;
+                self.refusals += 1;
+                if self.refusals >= GIVE_UP_AFTER {
+                    self.status = Some(format!(
+                        "stopped after {GIVE_UP_AFTER} tracks in a row would not play"
+                    ));
+                    self.now = NowPlaying::default();
+                    return Vec::new();
+                }
                 if self.now.chosen_by_hand || !self.queue.has_next() {
                     self.now = NowPlaying::default();
                     Vec::new()
                 } else {
-                    self.play_next(false)
+                    self.play_next(self.queue.repeat() == Repeat::One)
                 }
             }
         }

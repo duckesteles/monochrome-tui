@@ -36,7 +36,14 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("R", "queue more tracks like this one"),
         ],
     ),
-    ("leave", &[("?", "close this"), ("Q ctrl+c", "quit")]),
+    (
+        "leave",
+        &[
+            ("?", "close this"),
+            ("X", "sign out, press twice"),
+            ("Q ctrl+c", "quit"),
+        ],
+    ),
 ];
 
 pub fn line_count() -> usize {

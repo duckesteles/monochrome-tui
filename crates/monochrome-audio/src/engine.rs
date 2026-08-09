@@ -17,6 +17,7 @@ use symphonia::core::units::Time;
 const RING_SECONDS: f32 = 4.0;
 const IDLE_SLEEP: Duration = Duration::from_millis(5);
 const RESTING_SLEEP: Duration = Duration::from_millis(50);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct PlayRequest {
@@ -67,6 +68,7 @@ struct Shared {
     gain: AtomicU32,
     frames: AtomicU64,
     output_channels: AtomicU32,
+    settled: AtomicBool,
 }
 
 impl Shared {
@@ -78,6 +80,7 @@ impl Shared {
             gain: AtomicU32::new(1.0f32.to_bits()),
             frames: AtomicU64::new(0),
             output_channels: AtomicU32::new(2),
+            settled: AtomicBool::new(false),
         }
     }
 
@@ -157,9 +160,17 @@ impl Player {
 impl Drop for Player {
     fn drop(&mut self) {
         let _ = self.commands.send(Command::Shutdown);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + SHUTDOWN_GRACE;
+        while !self.shared.settled.load(Ordering::Acquire) {
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(IDLE_SLEEP);
         }
+        let _ = worker.join();
     }
 }
 
@@ -227,6 +238,7 @@ fn build_output(
             config.config(),
             move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 if !callback_shared.playing.load(Ordering::Relaxed) {
+                    callback_shared.ring.settle();
                     output.fill(0.0);
                     return;
                 }
@@ -301,14 +313,14 @@ fn open(request: &PlayRequest) -> Result<Playback, String> {
         .as_deref()
         .filter(|kind| source::is_textual(kind))
     {
-        let detail = read_error_body(&backend);
-        return Err(match detail {
+        return Err(match backend.preview() {
             Some(detail) => format!("the source returned a message, not audio: {detail}"),
             None => format!("the source returned {kind}, not audio"),
         });
     }
 
-    let source = RangeSource::new(Box::new(backend));
+    let mut source = RangeSource::new(Box::new(backend));
+    source.prime().map_err(|error| error.to_string())?;
 
     let stream = match request.decryption_key.as_deref() {
         Some(hex) => {
@@ -329,14 +341,16 @@ fn open(request: &PlayRequest) -> Result<Playback, String> {
     prepare(stream, hint)
 }
 
-fn read_error_body(backend: &HttpRange) -> Option<String> {
-    let mut reader = match backend.open_at(0) {
-        Ok(reader) => reader,
-        Err(error) => return Some(error.to_string()),
-    };
-    let mut body = String::new();
-    let _ = std::io::Read::read_to_string(&mut std::io::Read::take(&mut reader, 800), &mut body);
-    source::summarise(&body)
+fn unreadable(error: SymphoniaError) -> String {
+    if let SymphoniaError::IoError(io) = &error
+        && io.kind() != std::io::ErrorKind::UnexpectedEof
+    {
+        return io.to_string();
+    }
+    tracing::debug!(%error, "the probe could not identify the stream");
+    "this stream is not audio the client can read. the gateway may have returned an encrypted or \
+     fragmented file"
+        .to_string()
 }
 
 fn prepare(stream: MediaSourceStream<'static>, hint: Hint) -> Result<Playback, String> {
@@ -347,12 +361,7 @@ fn prepare(stream: MediaSourceStream<'static>, hint: Hint) -> Result<Playback, S
             FormatOptions::default(),
             MetadataOptions::default(),
         )
-        .map_err(|error| {
-            tracing::debug!(%error, "the probe could not identify the stream");
-            "this stream is not audio the client can read. the gateway may have returned an \
-             encrypted or fragmented file"
-                .to_string()
-        })?;
+        .map_err(unreadable)?;
 
     let track = format
         .default_track(TrackType::Audio)
@@ -397,6 +406,12 @@ fn prepare(stream: MediaSourceStream<'static>, hint: Hint) -> Result<Playback, S
 }
 
 fn run(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) {
+    let settled = Arc::clone(&shared);
+    serve(commands, events, shared);
+    settled.settled.store(true, Ordering::Release);
+}
+
+fn serve(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>) {
     let mut output: Option<Output> = None;
     let mut playback: Option<Playback> = None;
     let mut interleaved: Vec<f32> = Vec::new();

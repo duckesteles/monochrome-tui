@@ -31,6 +31,7 @@ pub enum Action {
     ToggleFavorite,
     Enqueue,
     Radio,
+    SignOut,
     OpenQueue,
     ToggleHelp,
     Insert(char),
@@ -38,7 +39,6 @@ pub enum Action {
     Submit,
     Cancel,
     NextField,
-    OpenBrowser,
     None,
 }
 
@@ -50,10 +50,18 @@ pub fn resolve(key: KeyEvent, focus: Focus) -> Action {
     }
 
     match focus {
-        Focus::SearchInput | Focus::FilterInput | Focus::Login | Focus::Verification => {
-            text_entry(key, focus)
-        }
+        Focus::SearchInput | Focus::FilterInput | Focus::Login => text_entry(key, focus),
+        Focus::Verification => waiting_on_the_browser(key),
         Focus::Browsing => browsing(key),
+    }
+}
+
+fn waiting_on_the_browser(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Enter => Action::Submit,
+        KeyCode::Esc => Action::Cancel,
+        KeyCode::Char('Q') => Action::Quit,
+        _ => Action::None,
     }
 }
 
@@ -105,6 +113,7 @@ fn browsing(key: KeyEvent) -> Action {
         KeyCode::Char('f') => Action::ToggleFavorite,
         KeyCode::Char('a') => Action::Enqueue,
         KeyCode::Char('R') => Action::Radio,
+        KeyCode::Char('X') => Action::SignOut,
         KeyCode::Char('q') => Action::OpenQueue,
         KeyCode::Char('Q') => Action::Quit,
         _ => Action::None,
@@ -274,6 +283,19 @@ mod tests {
         assert_eq!(
             resolve(key(KeyCode::Esc), Focus::Verification),
             Action::Cancel
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('j')), Focus::Verification),
+            Action::None
+        );
+    }
+
+    #[test]
+    fn the_verification_screen_takes_nothing_typed_so_quit_still_means_quit() {
+        assert_eq!(
+            resolve(key(KeyCode::Char('Q')), Focus::Verification),
+            Action::Quit,
+            "the shortcut list promises Q quits, and this screen has no field to type into"
         );
     }
 

@@ -407,7 +407,6 @@ fn verification<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
         Line::from(""),
     ];
 
-    let url = app.verification_url.clone().unwrap_or_default();
     if let Some(reason) = &app.verification_error {
         lines.push(Line::from(Span::styled(
             format!("   {reason}"),
@@ -415,14 +414,32 @@ fn verification<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
         )));
         lines.push(Line::from(""));
     }
-    lines.push(Line::from(Span::styled(
-        "   a browser tab is waiting for you at",
-        theme.dim(),
-    )));
-    lines.push(Line::from(Span::styled(format!("   {url}"), theme.base())));
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("   esc goes back", theme.dim())));
+    match &app.verification_url {
+        Some(url) => {
+            lines.push(Line::from(Span::styled(
+                "   a browser tab is waiting for you at",
+                theme.dim(),
+            )));
+            lines.push(Line::from(Span::styled(format!("   {url}"), theme.base())));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "   enter reopens the tab, esc goes back",
+                theme.dim(),
+            )));
+        }
+        None => {
+            lines.push(Line::from(Span::styled(
+                "   that check is spent, a new one has to be asked for",
+                theme.dim(),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "   enter asks again, esc goes back",
+                theme.dim(),
+            )));
+        }
+    }
 
     Paragraph::new(lines)
 }
