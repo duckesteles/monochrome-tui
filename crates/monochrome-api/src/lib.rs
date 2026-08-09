@@ -68,24 +68,26 @@ mod transport_tests {
 
     #[test]
     fn a_hostname_that_merely_contains_localhost_is_refused() {
-        assert!(!is_transport_allowed("http://localhost.evil.com"));
+        assert!(!is_transport_allowed("http://localhost.attacker.example"));
         assert!(!is_transport_allowed("http://notlocalhost"));
     }
 
     #[test]
     fn a_loopback_address_hidden_in_the_user_part_fools_nobody() {
         assert!(
-            !is_transport_allowed("http://127.0.0.1:8080@evil.com/"),
-            "everything before the @ is a username, the request goes to evil.com"
+            !is_transport_allowed("http://127.0.0.1:8080@attacker.example/"),
+            "everything before the @ is a username, the request goes to attacker.example"
         );
-        assert!(!is_transport_allowed("http://localhost@evil.com/"));
-        assert!(!is_transport_allowed("http://127.0.0.1@evil.com"));
-        assert!(!is_transport_allowed("http://user:pass@evil.com/"));
+        assert!(!is_transport_allowed("http://localhost@attacker.example/"));
+        assert!(!is_transport_allowed("http://127.0.0.1@attacker.example"));
+        assert!(!is_transport_allowed("http://user:pass@attacker.example/"));
     }
 
     #[test]
     fn a_real_host_behind_a_user_part_is_judged_on_its_own_merits() {
-        assert!(is_transport_allowed("http://evil.com:80@127.0.0.1/"));
+        assert!(is_transport_allowed(
+            "http://attacker.example:80@127.0.0.1/"
+        ));
         assert!(is_transport_allowed("https://user:pass@example.com/"));
     }
 
