@@ -246,7 +246,8 @@ fn the_help_overlay_can_be_scrolled() {
 fn the_help_overlay_lists_the_shortcuts_it_documents() {
     let mut app = app();
     app.show_help = true;
-    let rendered = text(&draw(&app, 80, 40));
+    let tall = crate::help::line_count() as u16 + 8;
+    let rendered = text(&draw(&app, 80, tall));
     for keys in ["j k / arrows", "space", "/", "?", "Q ctrl+c"] {
         assert!(rendered.contains(keys), "{keys} missing from the help");
     }
@@ -551,6 +552,7 @@ fn a_sync_the_server_could_not_take_leaves_the_playing_line_alone() {
         reason: "server returned 503".into(),
         temporary: true,
     });
+    app.status = None;
 
     let rendered = text(&draw(&app, 80, 24));
     assert!(
