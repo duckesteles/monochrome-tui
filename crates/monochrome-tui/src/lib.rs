@@ -1,4 +1,5 @@
 pub mod app;
+pub mod banner;
 pub mod config;
 pub mod diagnostics;
 pub mod dispatch;

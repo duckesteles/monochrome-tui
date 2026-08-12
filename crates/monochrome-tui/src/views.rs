@@ -330,6 +330,8 @@ fn status<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
     }
     if app.syncing {
         parts.push("syncing".into());
+    } else if app.sync_stalled {
+        parts.push("changes waiting".into());
     }
 
     Paragraph::new(Line::from(vec![

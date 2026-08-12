@@ -537,3 +537,33 @@ fn a_filter_left_in_place_stays_visible_while_browsing() {
         "a narrowed list must say why: {rendered}"
     );
 }
+
+#[test]
+fn a_sync_the_server_could_not_take_leaves_the_playing_line_alone() {
+    let mut app = app();
+    app.push(Screen::Album(album(vec![track(1, "One More Time")])));
+    app.now.track = Some(track(1, "One More Time"));
+    app.now.format = Some("flac".into());
+    app.now.source = Some("amazon".into());
+
+    app.apply(Message::SyncRejected {
+        fields: vec![monochrome_core::library::SyncField::History],
+        reason: "server returned 503".into(),
+        temporary: true,
+    });
+
+    let rendered = text(&draw(&app, 80, 24));
+    assert!(
+        !rendered.contains("503"),
+        "a status code the listener can do nothing about must not replace what is playing: \
+         {rendered}"
+    );
+    assert!(
+        rendered.contains("flac") && rendered.contains("amazon"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("changes waiting"),
+        "the line still has to say the library is not saved yet: {rendered}"
+    );
+}

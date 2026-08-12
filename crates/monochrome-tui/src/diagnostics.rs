@@ -20,6 +20,15 @@ fn describe_address(seen: Option<String>, issued_for: &[String]) -> String {
     }
 }
 
+fn describe_account_failure(error: &ApiError) -> String {
+    let reason = secrets::redact(&error.to_string());
+    if error.is_temporary() {
+        format!("the account service is down, not your session ({reason})")
+    } else {
+        format!("FAILED: {reason}")
+    }
+}
+
 pub async fn doctor(paths: Paths) -> Result<()> {
     let config = Config::load(&paths.config)?;
     let secrets = Secrets::new(paths.log_dir.join("credentials"));
@@ -78,12 +87,10 @@ pub async fn doctor(paths: Paths) -> Result<()> {
                             println!("          section {section}");
                         }
                     }
-                    Err(error) => {
-                        println!("library   FAILED: {}", secrets::redact(&error.to_string()))
-                    }
+                    Err(error) => println!("library   {}", describe_account_failure(&error)),
                 }
             }
-            Err(error) => println!("session   FAILED: {}", secrets::redact(&error.to_string())),
+            Err(error) => println!("session   {}", describe_account_failure(&error)),
         },
     }
 

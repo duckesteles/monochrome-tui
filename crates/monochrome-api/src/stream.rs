@@ -21,11 +21,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const RETRY_PAUSE: Duration = Duration::from_millis(400);
 
 pub fn worth_another_try(error: &ApiError) -> bool {
-    match error {
-        ApiError::Network(_) => true,
-        ApiError::Status { code, .. } => *code >= 500,
-        _ => false,
-    }
+    error.is_temporary()
 }
 
 pub fn worth_moving_on(error: &ApiError) -> bool {

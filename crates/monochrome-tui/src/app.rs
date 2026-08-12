@@ -157,7 +157,11 @@ pub enum Message {
     TrackDetails(Vec<Track>),
     Radio(Vec<Track>),
     Sync(Box<SyncDocument>),
-    SyncRejected(Vec<SyncField>),
+    SyncRejected {
+        fields: Vec<SyncField>,
+        reason: String,
+        temporary: bool,
+    },
     SignedIn(Box<User>),
     SignInFailed(String),
     SignedOut,
@@ -209,6 +213,7 @@ pub struct App {
     asked_about: HashSet<u64>,
     pub verification_error: Option<String>,
     pub syncing: bool,
+    pub sync_stalled: bool,
     pub quit: bool,
     pub confirming_sign_out: bool,
     radio_seed: Option<String>,
@@ -247,6 +252,7 @@ impl App {
             verification_url: None,
             verification_error: None,
             syncing: false,
+            sync_stalled: false,
             quit: false,
             confirming_sign_out: false,
             radio_seed: None,
@@ -874,13 +880,24 @@ impl App {
             }
             Message::Sync(document) => {
                 self.syncing = false;
+                self.sync_stalled = false;
                 self.library.merge_remote(*document);
                 self.move_cursor(0);
                 Vec::new()
             }
-            Message::SyncRejected(fields) => {
+            Message::SyncRejected {
+                fields,
+                reason,
+                temporary,
+            } => {
                 self.syncing = false;
+                self.sync_stalled = true;
                 self.library.mark_dirty(&fields);
+                if !temporary {
+                    self.status = Some(format!(
+                        "the account service refused your changes: {reason}"
+                    ));
+                }
                 Vec::new()
             }
             Message::SignedIn(user) => {
@@ -900,6 +917,7 @@ impl App {
             Message::SignedOut => {
                 self.user = None;
                 self.library = Library::default();
+                self.sync_stalled = false;
                 self.queue.clear();
                 self.now = NowPlaying::default();
                 self.focus = Focus::Login;
@@ -975,8 +993,10 @@ impl App {
                 if stay {
                     self.status = Some(if self.refusals >= GIVE_UP_AFTER {
                         format!("stopped after {GIVE_UP_AFTER} tracks in a row would not play")
-                    } else {
+                    } else if refused.is_empty() {
                         reason
+                    } else {
+                        format!("{refused} would not play: {reason}")
                     });
                     self.now = NowPlaying::default();
                     return Vec::new();
