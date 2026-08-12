@@ -101,7 +101,7 @@ fn main() -> Result<()> {
         return runtime.block_on(monochrome_tui::diagnostics::play_once(paths, query));
     }
 
-    let _guard = setup_logging(&paths.log_dir, args.verbose)?;
+    let _guard = setup_logging(&paths.log_dir, args.verbose).ok();
     runtime.block_on(run(paths))
 }
 
