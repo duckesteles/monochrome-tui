@@ -133,6 +133,22 @@ impl Track {
         self.album.as_ref().map(|a| a.title.as_str()).unwrap_or("")
     }
 
+    pub fn every_artist(&self) -> String {
+        let credited: Vec<&str> = self
+            .artists
+            .iter()
+            .map(|artist| artist.name.trim())
+            .filter(|name| !name.is_empty())
+            .collect();
+        if !credited.is_empty() {
+            return credited.join(", ");
+        }
+        self.artist
+            .as_ref()
+            .map(|artist| artist.name.trim().to_string())
+            .unwrap_or_default()
+    }
+
     pub fn display_title(&self) -> String {
         match self.version.as_deref().filter(|v| !v.is_empty()) {
             Some(version) => format!("{} ({})", self.title, version),

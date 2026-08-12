@@ -237,3 +237,58 @@ fn string_ids_from_the_server_are_accepted() {
     assert_eq!(tracks.len(), 1);
     assert_eq!(tracks[0].id, 1);
 }
+
+#[test]
+fn every_credited_artist_is_named_not_just_the_first() {
+    use crate::model::{ArtistRef, Quality, Track};
+
+    let mut track = Track {
+        id: 1,
+        title: "Sardunyaya Ağıt".into(),
+        duration: 185,
+        explicit: false,
+        artist: Some(ArtistRef {
+            id: 1,
+            name: "Fazil Say".into(),
+            picture: None,
+        }),
+        artists: vec![
+            ArtistRef {
+                id: 1,
+                name: "Fazil Say".into(),
+                picture: None,
+            },
+            ArtistRef {
+                id: 2,
+                name: "Serenad Bağcan".into(),
+                picture: None,
+            },
+        ],
+        album: None,
+        isrc: None,
+        track_number: None,
+        volume_number: None,
+        copyright: None,
+        version: None,
+        quality: Quality::Lossless,
+        replay_gain: None,
+        peak: None,
+        stream_ready: true,
+    };
+    assert_eq!(track.every_artist(), "Fazil Say, Serenad Bağcan");
+
+    track.artists.clear();
+    assert_eq!(track.every_artist(), "Fazil Say");
+
+    track.artist = None;
+    assert_eq!(
+        track.every_artist(),
+        "",
+        "an unknown artist must be left out, not invented"
+    );
+    assert_eq!(
+        track.artist_name(),
+        "Unknown Artist",
+        "the screen still needs something to show"
+    );
+}

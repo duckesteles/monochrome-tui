@@ -79,6 +79,7 @@ fn a_track_served_over_http_plays_from_start_to_finish() {
         replay_gain: None,
         peak: None,
         decryption_key: None,
+        expected_duration: None,
     });
 
     let seen = collect(&events, Duration::from_secs(20));
@@ -188,6 +189,7 @@ fn a_source_that_refuses_head_is_still_played() {
         replay_gain: None,
         peak: None,
         decryption_key: None,
+        expected_duration: None,
     });
 
     match wait_for_start(&events, Duration::from_secs(20)) {
@@ -244,6 +246,7 @@ fn failure_for(url: String) -> String {
         replay_gain: None,
         peak: None,
         decryption_key: None,
+        expected_duration: None,
     });
     collect(&events, Duration::from_secs(20))
         .into_iter()
@@ -282,6 +285,7 @@ fn switching_tracks_starts_the_new_one_promptly() {
         replay_gain: None,
         peak: None,
         decryption_key: None,
+        expected_duration: None,
     };
 
     player.play(request(first.url.clone()));
@@ -342,6 +346,7 @@ fn a_cd_rate_track_reaches_a_cd_rate_device_untouched() {
         replay_gain: None,
         peak: None,
         decryption_key: None,
+        expected_duration: None,
     });
 
     let seen = collect(&events, Duration::from_secs(20));
@@ -375,10 +380,61 @@ fn a_source_that_answers_with_an_error_is_reported_not_ignored() {
         replay_gain: None,
         peak: None,
         decryption_key: None,
+        expected_duration: None,
     });
     let seen = collect(&events, Duration::from_secs(20));
     assert!(
         seen.iter().any(|event| matches!(event, Event::Failed(_))),
         "expected a failure, saw {seen:?}"
     );
+}
+
+#[test]
+fn a_stream_of_quite_another_length_is_refused_rather_than_played() {
+    let serving = serve(wav(44_100, 2, 44_100 * 3));
+    let (player, events) = Player::spawn();
+    player.set_volume(0.0);
+    player.play(PlayRequest {
+        url: serving.url.clone(),
+        headers: Vec::new(),
+        replay_gain: None,
+        peak: None,
+        decryption_key: None,
+        expected_duration: Some(102.0),
+    });
+
+    let reason = collect(&events, Duration::from_secs(20))
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Failed(reason) => Some(reason),
+            _ => None,
+        })
+        .expect("a three second stream is not a one minute forty two second song");
+    assert!(
+        reason.contains("performance"),
+        "the listener should be told it is the wrong recording, got: {reason}"
+    );
+    assert!(!player.is_playing());
+}
+
+#[test]
+fn a_stream_of_the_length_that_was_asked_for_plays() {
+    let serving = serve(wav(44_100, 2, 44_100 * 3));
+    let (player, events) = Player::spawn();
+    player.set_volume(0.0);
+    player.play(PlayRequest {
+        url: serving.url.clone(),
+        headers: Vec::new(),
+        replay_gain: None,
+        peak: None,
+        decryption_key: None,
+        expected_duration: Some(3.0),
+    });
+
+    match wait_for_start(&events, Duration::from_secs(20)) {
+        Some(Ok(())) => {}
+        Some(Err(reason)) if reason.contains("audio") && reason.contains("device") => {}
+        Some(Err(reason)) => panic!("the right recording must not be refused: {reason}"),
+        None => panic!("the track should have started"),
+    }
 }

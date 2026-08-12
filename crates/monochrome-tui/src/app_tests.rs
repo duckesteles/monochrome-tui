@@ -44,6 +44,20 @@ fn track(id: u64) -> Track {
     }
 }
 
+fn refused(reason: &str) -> Message {
+    Message::PlaybackFailed {
+        reason: reason.into(),
+        worth_moving_on: true,
+    }
+}
+
+fn broke(reason: &str) -> Message {
+    Message::PlaybackFailed {
+        reason: reason.into(),
+        worth_moving_on: false,
+    }
+}
+
 fn album(id: u64, tracks: Vec<Track>) -> Album {
     Album {
         id,
@@ -287,7 +301,7 @@ fn a_playback_failure_moves_on_to_the_next_track() {
     app.cursor_to_start();
     app.open_selected();
     app.apply(Message::PlaybackFinished);
-    let effects = app.apply(Message::PlaybackFailed("no source".into()));
+    let effects = app.apply(refused("no source"));
     assert_eq!(app.status.as_deref(), Some("no source"));
     assert!(effects.is_empty());
 }
@@ -300,7 +314,7 @@ fn a_track_the_listener_picked_is_never_silently_replaced_by_another() {
     app.open_selected();
     assert_eq!(app.queue.current().expect("current").id, 1);
 
-    let effects = app.apply(Message::PlaybackFailed("no source".into()));
+    let effects = app.apply(refused("no source"));
     assert!(
         effects.is_empty(),
         "picking a track and getting a different one is worse than getting nothing"
@@ -318,7 +332,7 @@ fn a_track_that_started_on_its_own_still_gives_way_to_the_next() {
     app.apply(Message::PlaybackFinished);
     assert_eq!(app.queue.current().expect("current").id, 2);
 
-    let effects = app.apply(Message::PlaybackFailed("unavailable".into()));
+    let effects = app.apply(refused("unavailable"));
     assert!(matches!(effects.first(), Some(Effect::Play(_))));
     assert_eq!(app.queue.current().expect("current").id, 3);
 }
@@ -402,7 +416,7 @@ fn a_track_on_repeat_that_will_not_play_is_left_behind_rather_than_hammered() {
     app.apply(Message::PlaybackFinished);
     assert_eq!(app.queue.current().expect("current").id, 1);
 
-    app.apply(Message::PlaybackFailed("no source".into()));
+    app.apply(refused("no source"));
     assert_eq!(
         app.queue.current().expect("current").id,
         2,
@@ -420,11 +434,11 @@ fn a_queue_of_tracks_that_all_refuse_to_play_stops_instead_of_running_on() {
     app.apply(Message::PlaybackFinished);
 
     let mut attempts = 0;
-    let mut effects = app.apply(Message::PlaybackFailed("no source".into()));
+    let mut effects = app.apply(refused("no source"));
     while !effects.is_empty() {
         attempts += 1;
         assert!(attempts < 50, "the client never gave up");
-        effects = app.apply(Message::PlaybackFailed("no source".into()));
+        effects = app.apply(refused("no source"));
     }
     assert!(app.now.track.is_none());
     assert_eq!(
@@ -444,14 +458,14 @@ fn a_track_that_plays_forgives_the_failures_before_it() {
     app.apply(Message::PlaybackFinished);
 
     for _ in 0..3 {
-        app.apply(Message::PlaybackFailed("no source".into()));
+        app.apply(refused("no source"));
     }
     app.apply(Message::PlaybackStarted {
         duration: Some(200.0),
         format: "flac".into(),
     });
     for _ in 0..3 {
-        let effects = app.apply(Message::PlaybackFailed("no source".into()));
+        let effects = app.apply(refused("no source"));
         assert!(
             !effects.is_empty(),
             "a run of failures that was broken by a track playing must not count against it"
@@ -534,7 +548,7 @@ fn a_failure_on_the_last_track_clears_the_player() {
     app.push(Screen::Album(album(1, vec![track(1)])));
     app.cursor_to_start();
     app.open_selected();
-    app.apply(Message::PlaybackFailed("no source".into()));
+    app.apply(refused("no source"));
     assert!(app.now.track.is_none());
 }
 
@@ -1114,5 +1128,83 @@ fn the_search_tab_is_never_filtered() {
     assert!(
         app.rows().iter().any(|row| matches!(row, Row::Track(_))),
         "catalogue results must not be narrowed by the list filter"
+    );
+}
+
+fn same_title_different_singer(id: u64, singer: &str) -> Track {
+    let mut track = track(id);
+    track.title = "Sardunyaya Ağıt".into();
+    track.artist = Some(ArtistRef {
+        id,
+        name: singer.into(),
+        picture: None,
+    });
+    track
+}
+
+#[test]
+fn a_service_having_a_bad_minute_does_not_hand_you_someone_elses_song() {
+    let mut app = app();
+    app.tab = Tab::Search;
+    app.search_results = SearchResults {
+        tracks: vec![
+            same_title_different_singer(1, "Fazil Say"),
+            same_title_different_singer(2, "Yeni Türkü"),
+            same_title_different_singer(3, "Mirzabah"),
+        ],
+        ..Default::default()
+    };
+    app.cursor_to_start();
+    app.open_selected();
+    app.apply(Message::PlaybackStarted {
+        duration: Some(185.0),
+        format: "flac".into(),
+    });
+    app.apply(Message::PlaybackFinished);
+    assert_eq!(app.queue.current().expect("current").id, 2);
+
+    let effects = app.apply(broke("server returned 503"));
+    assert!(
+        effects.is_empty(),
+        "a service that is briefly unwell is no reason to play a different singer"
+    );
+    assert_eq!(
+        app.queue.current().expect("current").id,
+        2,
+        "the queue must stay where the listener left it"
+    );
+    assert_eq!(app.status.as_deref(), Some("server returned 503"));
+}
+
+#[test]
+fn a_track_the_service_really_does_not_have_is_skipped_and_said_out_loud() {
+    let mut app = app();
+    app.push(Screen::Album(album(1, vec![track(1), track(2)])));
+    app.cursor_to_start();
+    app.open_selected();
+    app.apply(Message::PlaybackFinished);
+    assert_eq!(app.queue.current().expect("current").id, 2);
+
+    let effects = app.apply(refused("not found"));
+    assert!(effects.is_empty(), "there is nothing after the last track");
+    assert_eq!(app.status.as_deref(), Some("not found"));
+}
+
+#[test]
+fn skipping_a_missing_track_names_the_one_that_would_not_play() {
+    let mut app = app();
+    app.push(Screen::Album(album(
+        1,
+        vec![track(1), track(2), track(3), track(4)],
+    )));
+    app.cursor_to_start();
+    app.open_selected();
+    app.apply(Message::PlaybackFinished);
+
+    app.apply(refused("not found"));
+    let said = app.status.clone().expect("a status");
+    assert!(
+        said.contains("Song 2") && said.contains("Song 3"),
+        "the listener should be told what was skipped and what took its place, got: {said}"
     );
 }

@@ -176,7 +176,10 @@ pub enum Message {
     PlaybackPosition(f64),
     PlaybackPaused(bool),
     PlaybackFinished,
-    PlaybackFailed(String),
+    PlaybackFailed {
+        reason: String,
+        worth_moving_on: bool,
+    },
 }
 
 pub struct App {
@@ -952,23 +955,42 @@ impl App {
                 Vec::new()
             }
             Message::PlaybackFinished => self.play_next(false),
-            Message::PlaybackFailed(reason) => {
-                self.status = Some(reason);
+            Message::PlaybackFailed {
+                reason,
+                worth_moving_on,
+            } => {
+                let refused = self
+                    .now
+                    .track
+                    .as_ref()
+                    .map(Track::display_title)
+                    .unwrap_or_default();
                 self.now.loading = false;
                 self.refusals += 1;
-                if self.refusals >= GIVE_UP_AFTER {
-                    self.status = Some(format!(
-                        "stopped after {GIVE_UP_AFTER} tracks in a row would not play"
-                    ));
+
+                let stay = self.now.chosen_by_hand
+                    || !worth_moving_on
+                    || !self.queue.has_next()
+                    || self.refusals >= GIVE_UP_AFTER;
+                if stay {
+                    self.status = Some(if self.refusals >= GIVE_UP_AFTER {
+                        format!("stopped after {GIVE_UP_AFTER} tracks in a row would not play")
+                    } else {
+                        reason
+                    });
                     self.now = NowPlaying::default();
                     return Vec::new();
                 }
-                if self.now.chosen_by_hand || !self.queue.has_next() {
-                    self.now = NowPlaying::default();
-                    Vec::new()
-                } else {
-                    self.play_next(self.queue.repeat() == Repeat::One)
-                }
+
+                let effects = self.play_next(self.queue.repeat() == Repeat::One);
+                self.status = Some(match self.queue.current() {
+                    Some(next) if !refused.is_empty() => format!(
+                        "{refused} would not play, moving on to {}",
+                        next.display_title()
+                    ),
+                    _ => reason,
+                });
+                effects
             }
         }
     }
