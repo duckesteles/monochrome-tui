@@ -899,12 +899,17 @@ impl App {
                 temporary,
             } => {
                 self.syncing = false;
+                let first_time = !self.sync_stalled;
                 self.sync_stalled = true;
                 self.library.mark_dirty(&fields);
                 if !temporary {
                     self.status = Some(format!(
                         "the account service refused your changes: {reason}"
                     ));
+                } else if first_time {
+                    self.status = Some(
+                        "the account service is not answering, your changes are safe here".into(),
+                    );
                 }
                 Vec::new()
             }

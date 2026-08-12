@@ -37,6 +37,17 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "the bottom line",
+        &[
+            ("flac amazon", "how this track arrived"),
+            ("syncing", "sending your library to your account"),
+            (
+                "changes waiting",
+                "saved here, not sent yet, it keeps trying",
+            ),
+        ],
+    ),
+    (
         "leave",
         &[
             ("?", "close this"),
@@ -64,6 +75,20 @@ mod tests {
         for (group, entries) in SHORTCUTS {
             assert!(!group.is_empty());
             assert!(!entries.is_empty(), "{group} documents nothing");
+        }
+    }
+
+    #[test]
+    fn every_mark_the_bottom_line_can_show_is_explained_here() {
+        let explained: Vec<&str> = SHORTCUTS
+            .iter()
+            .flat_map(|(_, entries)| entries.iter().map(|(keys, _)| *keys))
+            .collect();
+        for mark in ["syncing", "changes waiting"] {
+            assert!(
+                explained.contains(&mark),
+                "the line can show {mark:?} with nothing to tell the reader what it means"
+            );
         }
     }
 

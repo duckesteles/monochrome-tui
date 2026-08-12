@@ -570,20 +570,37 @@ fn a_sync_the_server_refused_is_kept_rather_than_thrown_away() {
 }
 
 #[test]
-fn a_sync_that_can_be_tried_again_stays_out_of_the_now_playing_line() {
+fn a_stalled_sync_explains_itself_once_and_then_only_shows_the_mark() {
     let mut app = app();
     let fields = pending_changes(&mut app);
 
-    app.apply(rejected(fields, "server returned 503", true));
-
-    assert_eq!(
-        app.status, None,
-        "a hiccup the client will retry on its own must not take over the line \
-         that says what is playing"
+    app.apply(rejected(fields.clone(), "server returned 530", true));
+    let said = app
+        .status
+        .clone()
+        .expect("a mark nobody can read is the problem all over again");
+    assert!(
+        said.contains("account service") && said.contains("safe"),
+        "it has to say what is not answering and that nothing is lost, got {said:?}"
     );
     assert!(
         app.sync_stalled,
-        "the line still has to admit the changes are not saved yet"
+        "the line has to keep admitting the changes are not saved yet"
+    );
+
+    app.status = None;
+    app.apply(rejected(fields.clone(), "server returned 530", true));
+    assert_eq!(
+        app.status, None,
+        "repeating it on every track is what made the old message noise"
+    );
+
+    app.apply(Message::Sync(Box::default()));
+    app.library.mark_dirty(&fields);
+    app.apply(rejected(fields, "server returned 530", true));
+    assert!(
+        app.status.is_some(),
+        "a fresh outage after a good sync is news again"
     );
 }
 
