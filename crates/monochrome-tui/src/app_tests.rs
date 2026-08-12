@@ -427,6 +427,21 @@ fn the_filter_reaches_inside_a_playlist_and_an_artist_page_too() {
 }
 
 #[test]
+fn a_new_search_starts_without_an_old_filter_hidden_behind_it() {
+    let mut app = app();
+    app.push(Screen::Album(album(1, vec![track(1), track(2)])));
+    app.filter = "song 2".into();
+    assert_eq!(app.rows().len(), 1, "the filter narrows the album");
+
+    app.search_input = "ahmet kaya".into();
+    app.submit_search();
+    assert!(
+        app.filter.is_empty(),
+        "a filter the search results ignore must not be left lying in wait"
+    );
+}
+
+#[test]
 fn a_screen_that_is_still_loading_is_not_filtered_away() {
     let mut app = app();
     app.filter = "sardunya".into();

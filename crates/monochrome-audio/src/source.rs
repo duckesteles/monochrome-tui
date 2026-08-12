@@ -4,6 +4,7 @@ use symphonia::core::io::MediaSource;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+const READ_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 const PREVIEW_BYTES: u64 = 800;
 
 pub trait ByteRange: Send + Sync {
@@ -144,9 +145,18 @@ pub fn is_textual(content_type: &str) -> bool {
 
 impl HttpRange {
     pub fn open(url: &str, headers: &[(String, String)]) -> IoResult<Self> {
+        Self::open_with_patience(url, headers, READ_STALL_TIMEOUT)
+    }
+
+    pub fn open_with_patience(
+        url: &str,
+        headers: &[(String, String)],
+        patience: Duration,
+    ) -> IoResult<Self> {
         crate::use_ring_for_tls();
         let client = reqwest::blocking::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(patience)
             .user_agent(concat!("monochrome-tui/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(to_io)?;

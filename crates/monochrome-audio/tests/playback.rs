@@ -438,3 +438,86 @@ fn a_stream_of_the_length_that_was_asked_for_plays() {
         None => panic!("the track should have started"),
     }
 }
+
+struct Stalling {
+    url: String,
+    _handle: std::thread::JoinHandle<()>,
+}
+
+fn serve_then_go_quiet(declared_len: usize, sent: usize, hold: Duration) -> Stalling {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener binds");
+    let port = listener.local_addr().expect("address").port();
+    let handle = std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let peek = stream.try_clone().expect("clone");
+            let mut lines = BufReader::new(peek);
+            let mut first = String::new();
+            if lines.read_line(&mut first).is_err() {
+                continue;
+            }
+            let mut header = String::new();
+            loop {
+                header.clear();
+                match lines.read_line(&mut header) {
+                    Ok(0) => break,
+                    Ok(_) if header.trim().is_empty() => break,
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+            let head = first.starts_with("HEAD");
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: \
+                     {declared_len}\r\nAccept-Ranges: bytes\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            if head {
+                let _ = stream.flush();
+                continue;
+            }
+            let _ = stream.write_all(&vec![0u8; sent]);
+            let _ = stream.flush();
+            std::thread::sleep(hold);
+        }
+    });
+    Stalling {
+        url: format!("http://127.0.0.1:{port}/audio.wav"),
+        _handle: handle,
+    }
+}
+
+#[test]
+fn a_source_that_goes_quiet_part_way_through_gives_up_instead_of_hanging() {
+    use monochrome_audio::source::{HttpRange, RangeSource};
+    use std::io::Read;
+
+    let server = serve_then_go_quiet(4 * 1024 * 1024, 1024, Duration::from_secs(20));
+    let patience = Duration::from_millis(400);
+
+    let started = Instant::now();
+    let backend = HttpRange::open_with_patience(&server.url, &[], patience).expect("opened");
+    let mut source = RangeSource::new(Box::new(backend));
+
+    let mut scratch = vec![0u8; 8192];
+    let outcome: std::io::Result<()> = loop {
+        match source.read(&mut scratch) {
+            Ok(0) => break Ok(()),
+            Ok(_) => continue,
+            Err(error) => break Err(error),
+        }
+    };
+
+    let waited = started.elapsed();
+    assert!(
+        outcome.is_err(),
+        "a stalled source must be reported, not waited on forever"
+    );
+    assert!(
+        waited < Duration::from_secs(10),
+        "the reader hung for {waited:?} on a source that stopped sending"
+    );
+}

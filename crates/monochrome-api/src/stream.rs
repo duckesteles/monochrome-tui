@@ -21,7 +21,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const RETRY_PAUSE: Duration = Duration::from_millis(400);
 
 pub fn worth_another_try(error: &ApiError) -> bool {
-    error.is_temporary()
+    match error {
+        ApiError::Status { code: 429, .. } => false,
+        other => other.is_temporary(),
+    }
 }
 
 pub fn worth_moving_on(error: &ApiError) -> bool {
@@ -994,6 +997,27 @@ mod tests {
             gateway_message(page).expect("something to show"),
             "Service Suspended"
         );
+    }
+
+    #[test]
+    fn a_service_that_asked_for_less_traffic_is_not_asked_again_at_once() {
+        let throttled = ApiError::Status {
+            code: 429,
+            message: "the playback service is rate limiting this client".into(),
+        };
+        assert!(
+            throttled.is_temporary(),
+            "it will pass, so the library sync may wait it out"
+        );
+        assert!(
+            !worth_another_try(&throttled),
+            "answering a rate limit with a second request in 400ms is what earned it"
+        );
+        assert!(worth_another_try(&ApiError::Status {
+            code: 503,
+            message: String::new(),
+        }));
+        assert!(worth_another_try(&ApiError::Network("reset".into())));
     }
 
     #[test]

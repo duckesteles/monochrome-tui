@@ -567,3 +567,22 @@ fn a_sync_the_server_could_not_take_leaves_the_playing_line_alone() {
         "the line still has to say the library is not saved yet: {rendered}"
     );
 }
+
+#[test]
+fn the_search_tab_does_not_claim_a_filter_it_ignores() {
+    let mut app = app();
+    app.tab = Tab::Search;
+    app.filter = "sardunya".into();
+    let rendered = text(&draw(&app, 80, 24));
+    assert!(
+        !rendered.contains("filter: sardunya"),
+        "catalogue results are never narrowed, so saying they are is a lie: {rendered}"
+    );
+
+    app.push(Screen::Album(album(vec![track(1, "One More Time")])));
+    let rendered = text(&draw(&app, 80, 24));
+    assert!(
+        rendered.contains("filter: sardunya"),
+        "one screen deeper the filter does narrow the list, so it has to show: {rendered}"
+    );
+}

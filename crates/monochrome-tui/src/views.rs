@@ -89,7 +89,7 @@ fn context_line<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
         ]));
     }
     let mut spans = vec![Span::raw("  "), Span::styled(app.breadcrumb(), theme.dim())];
-    if !app.filter.trim().is_empty() {
+    if !app.filter.trim().is_empty() && !app.slash_means_search() {
         spans.push(Span::styled(
             format!("   filter: {}", app.filter),
             theme.dim(),

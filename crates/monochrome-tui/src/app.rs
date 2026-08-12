@@ -827,12 +827,17 @@ impl App {
             (self.help_scroll as i32 + delta as i32).clamp(0, furthest as i32) as u16;
     }
 
+    pub fn slash_means_search(&self) -> bool {
+        self.tab == Tab::Search && self.stack.is_empty()
+    }
+
     pub fn submit_search(&mut self) -> Vec<Effect> {
         let query = self.search_input.trim().to_string();
         self.focus = Focus::Browsing;
         if query.is_empty() {
             return Vec::new();
         }
+        self.filter.clear();
         self.tab = Tab::Search;
         self.stack.clear();
         self.cursors = vec![0];

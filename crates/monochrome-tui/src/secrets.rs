@@ -1,7 +1,9 @@
 use anyhow::Result;
 use std::path::PathBuf;
+use std::time::Duration;
 
 const SERVICE: &str = "monochrome-tui";
+const KEYRING_PATIENCE: Duration = Duration::from_secs(5);
 pub const SESSION_TOKEN: &str = "session-token";
 pub const PLAYBACK_SESSION: &str = "playback-session";
 pub const LEGACY_PLAYBACK_SESSION: &str = "amazon-jwt";
@@ -16,6 +18,7 @@ pub struct Secrets {
     fallback: PathBuf,
     worker: std::sync::Mutex<Option<std::sync::mpsc::Sender<Request>>>,
     rewriting: std::sync::Mutex<()>,
+    patience: Duration,
 }
 
 impl Secrets {
@@ -29,6 +32,7 @@ impl Secrets {
             fallback,
             worker: std::sync::Mutex::new(spawned.ok().map(|_| sender)),
             rewriting: std::sync::Mutex::new(()),
+            patience: KEYRING_PATIENCE,
         }
     }
 
@@ -40,10 +44,15 @@ impl Secrets {
         }
     }
 
+    fn forget_in_the_keyring(&self, key: &str) {
+        let (reply, _answer) = std::sync::mpsc::channel();
+        self.dispatch(Request::Clear(key.to_string(), reply));
+    }
+
     pub fn get(&self, key: &str) -> Option<String> {
         let (reply, answer) = std::sync::mpsc::channel();
         if self.dispatch(Request::Get(key.to_string(), reply))
-            && let Ok(Some(secret)) = answer.recv()
+            && let Ok(Some(secret)) = answer.recv_timeout(self.patience)
         {
             return Some(secret);
         }
@@ -53,18 +62,19 @@ impl Secrets {
     pub fn set(&self, key: &str, value: &str) -> Result<()> {
         let (reply, answer) = std::sync::mpsc::channel();
         if self.dispatch(Request::Set(key.to_string(), value.to_string(), reply))
-            && answer.recv().unwrap_or(false)
+            && answer.recv_timeout(self.patience).unwrap_or(false)
         {
             let _ = self.remove_fallback(key);
             return Ok(());
         }
+        self.forget_in_the_keyring(key);
         self.write_fallback(key, Some(value))
     }
 
     pub fn clear(&self, key: &str) -> bool {
         let (reply, answer) = std::sync::mpsc::channel();
         if self.dispatch(Request::Clear(key.to_string(), reply)) {
-            let _ = answer.recv();
+            let _ = answer.recv_timeout(self.patience);
         }
         let _ = self.remove_fallback(key);
         self.get(key).is_none()
@@ -178,9 +188,93 @@ fn looks_secret(word: &str) -> bool {
 }
 
 #[cfg(test)]
+impl Secrets {
+    fn with_worker(
+        fallback: PathBuf,
+        patience: Duration,
+        worker: impl FnOnce(std::sync::mpsc::Receiver<Request>) + Send + 'static,
+    ) -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel::<Request>();
+        std::thread::spawn(move || worker(receiver));
+        Self {
+            fallback,
+            worker: std::sync::Mutex::new(Some(sender)),
+            rewriting: std::sync::Mutex::new(()),
+            patience,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::testing::Scratch;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    fn silent(requests: std::sync::mpsc::Receiver<Request>) {
+        let mut held = Vec::new();
+        while let Ok(request) = requests.recv() {
+            held.push(request);
+        }
+    }
+
+    #[test]
+    fn a_keyring_that_never_answers_does_not_freeze_the_client() {
+        let scratch = Scratch::new("deaf");
+        let store = Secrets::with_worker(
+            scratch.file("credentials"),
+            Duration::from_millis(50),
+            silent,
+        );
+        store
+            .write_fallback("session-token", Some("kept"))
+            .expect("write");
+
+        let started = Instant::now();
+        assert_eq!(store.get("session-token").as_deref(), Some("kept"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a locked keyring must not hold the whole client, waited {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_secret_the_keyring_would_not_take_is_not_left_there_stale() {
+        let scratch = Scratch::new("stale");
+        let asked: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&asked);
+        let store = Secrets::with_worker(
+            scratch.file("credentials"),
+            Duration::from_secs(1),
+            move |requests| {
+                while let Ok(request) = requests.recv() {
+                    match request {
+                        Request::Get(_, reply) => {
+                            seen.lock().expect("seen").push("get");
+                            let _ = reply.send(Some("an older token".into()));
+                        }
+                        Request::Set(_, _, reply) => {
+                            seen.lock().expect("seen").push("set");
+                            let _ = reply.send(false);
+                        }
+                        Request::Clear(_, reply) => {
+                            seen.lock().expect("seen").push("clear");
+                            let _ = reply.send(true);
+                        }
+                    }
+                }
+            },
+        );
+
+        store.set("session-token", "the new token").expect("set");
+        let requests = asked.lock().expect("asked").clone();
+        assert!(
+            requests.contains(&"clear"),
+            "a keyring that kept an older token would hand it back forever, asked {requests:?}"
+        );
+    }
 
     #[test]
     fn a_value_written_to_the_fallback_can_be_read_back() {
