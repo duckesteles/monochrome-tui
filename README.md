@@ -91,7 +91,7 @@ session is still good, which covers most reasons a track refuses to play.
 ~/.config/monochrome-tui/config.toml        settings
 ~/.local/state/monochrome-tui/snapshot.json your library, so the first screen is not empty
 ~/.local/state/monochrome-tui/credentials   only if your system has no keyring
-~/.local/state/monochrome-tui/log           only with --verbose
+~/.local/state/monochrome-tui/log           what went wrong, or everything with --verbose
 ~/.cache/monochrome-tui/                    the track being played, nothing more
 ```
 

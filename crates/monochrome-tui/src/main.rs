@@ -10,6 +10,7 @@ use monochrome_api::{AuthClient, Catalog, StreamResolver};
 use monochrome_audio::{PlayRequest, Player};
 use monochrome_core::model::Track;
 use monochrome_tui::app::{App, ArtistPage, Effect, Focus, Message};
+use monochrome_tui::banner::Banner;
 use monochrome_tui::config::{Config, Paths};
 use monochrome_tui::dispatch;
 use monochrome_tui::secrets::{self, PLAYBACK_SESSION, SESSION_TOKEN, Secrets};
@@ -25,6 +26,8 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 const STATUS_LIFETIME: Duration = Duration::from_secs(5);
 const SYNC_DEBOUNCE: Duration = Duration::from_secs(5);
+const RESTORE_ATTEMPTS: u32 = 3;
+const RESTORE_PAUSE: Duration = Duration::from_secs(2);
 
 #[derive(Parser, Debug)]
 #[command(
@@ -33,7 +36,10 @@ const SYNC_DEBOUNCE: Duration = Duration::from_secs(5);
     version
 )]
 struct Args {
-    #[arg(long, help = "Write a log file to the state directory")]
+    #[arg(
+        long,
+        help = "Log everything, not only what went wrong, to the state directory"
+    )]
     verbose: bool,
     #[arg(long, help = "Print the resolved file locations and exit")]
     paths: bool,
@@ -76,11 +82,6 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let _guard = args
-        .verbose
-        .then(|| setup_logging(&paths.log_dir))
-        .transpose()?;
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -99,6 +100,8 @@ fn main() -> Result<()> {
     if let Some(query) = args.play {
         return runtime.block_on(monochrome_tui::diagnostics::play_once(paths, query));
     }
+
+    let _guard = setup_logging(&paths.log_dir, args.verbose).ok();
     runtime.block_on(run(paths))
 }
 
@@ -139,7 +142,10 @@ fn uninstall(paths: Paths, assume_yes: bool) -> Result<()> {
     Ok(())
 }
 
-fn setup_logging(dir: &std::path::Path) -> Result<tracing_appender::non_blocking::WorkerGuard> {
+fn setup_logging(
+    dir: &std::path::Path,
+    verbose: bool,
+) -> Result<tracing_appender::non_blocking::WorkerGuard> {
     monochrome_tui::paths::create_private_dir(dir)?;
     monochrome_tui::paths::create_private_file(&dir.join("log"))?;
     let appender = tracing_appender::rolling::never(dir, "log");
@@ -148,8 +154,12 @@ fn setup_logging(dir: &std::path::Path) -> Result<tracing_appender::non_blocking
         .with_writer(writer)
         .with_ansi(false)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "monochrome=debug,info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
+                |_| match verbose {
+                    true => "monochrome=debug,info".into(),
+                    false => "warn".into(),
+                },
+            ),
         )
         .init();
     Ok(guard)
@@ -198,7 +208,7 @@ async fn run(paths: Paths) -> Result<()> {
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    let mut status_since = Instant::now();
+    let mut banner = Banner::new(STATUS_LIFETIME, Instant::now());
     let mut bridge_offered = false;
     let mut scheduler = SyncScheduler::new(SYNC_DEBOUNCE);
     let mut redraw = true;
@@ -218,10 +228,7 @@ async fn run(paths: Paths) -> Result<()> {
             event = events.next() => match event {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                     redraw = true;
-                    {
-                        status_since = Instant::now();
-                        dispatch::on_key(&mut app, key)
-                    }
+                    dispatch::on_key(&mut app, key)
                 }
                 Some(Ok(Event::Resize(_, _))) => {
                     redraw = true;
@@ -233,16 +240,20 @@ async fn run(paths: Paths) -> Result<()> {
             message = inbox.recv() => match message {
                 Some(message) => {
                     redraw = true;
-                    if matches!(message, Message::Notice(_) | Message::Failure(_) | Message::SignInFailed(_)) {
-                        status_since = Instant::now();
-                    }
                     match &message {
                         Message::NeedsVerification(_) => bridge_offered = true,
                         Message::Verified | Message::VerificationFailed(_) => bridge_offered = false,
                         _ => {}
                     }
+                    match &message {
+                        Message::Sync(_) => scheduler.settled(),
+                        Message::SyncRejected { temporary: true, .. } => {
+                            scheduler.retry(Instant::now())
+                        }
+                        _ => {}
+                    }
                     let arrived_from_server =
-                        matches!(message, Message::Sync(_) | Message::SyncRejected(_));
+                        matches!(message, Message::Sync(_) | Message::SyncRejected { .. });
                     let signed_out = matches!(message, Message::SignedOut);
                     let effects = app.apply(message);
                     if arrived_from_server {
@@ -256,7 +267,7 @@ async fn run(paths: Paths) -> Result<()> {
                 None => break,
             },
             _ = ticker.tick() => {
-                if app.status.is_some() && status_since.elapsed() > STATUS_LIFETIME {
+                if banner.is_stale(Instant::now()) {
                     app.status = None;
                     redraw = true;
                 }
@@ -287,13 +298,15 @@ async fn run(paths: Paths) -> Result<()> {
                 other => perform(other, &services, &player, &messages, !bridge_offered),
             }
         }
+        banner.watch(app.status.as_deref(), Instant::now());
 
         if app.quit {
             break;
         }
     }
 
-    if scheduler.take_now() {
+    let anything_undelivered = !app.library.dirty_fields().is_empty();
+    if scheduler.take_now() || anything_undelivered {
         flush_on_exit(&mut app, &services, &paths).await;
     } else {
         save_snapshot(&app, &paths);
@@ -324,7 +337,11 @@ fn perform(
             tokio::spawn(async move {
                 let message = match services.catalog.search(&query).await {
                     Ok(results) => Message::SearchResults(Box::new(results)),
-                    Err(error) => Message::SearchFailed(secrets::redact(&error.to_string())),
+                    Err(error) => {
+                        let reason = secrets::redact(&error.to_string());
+                        tracing::warn!(reason, "the search failed");
+                        Message::SearchFailed(format!("the search failed: {reason}"))
+                    }
                 };
                 let _ = messages.send(message);
             });
@@ -337,7 +354,7 @@ fn perform(
                     Ok(album) => {
                         let _ = messages.send(Message::Album(Box::new(album)));
                     }
-                    Err(error) => report(&messages, error),
+                    Err(error) => report(&messages, "could not open that album", error),
                 }
             });
         }
@@ -358,7 +375,7 @@ fn perform(
                             top_tracks: tracks.unwrap_or_default(),
                         })));
                     }
-                    Err(error) => report(&messages, error),
+                    Err(error) => report(&messages, "could not open that artist", error),
                 }
             });
         }
@@ -390,7 +407,7 @@ fn perform(
                     Ok(tracks) => {
                         let _ = messages.send(Message::Radio(tracks));
                     }
-                    Err(error) => report(&messages, error),
+                    Err(error) => report(&messages, "could not build a radio", error),
                 }
             });
         }
@@ -402,7 +419,7 @@ fn perform(
                     Ok((playlist, tracks)) => {
                         let _ = messages.send(Message::Playlist(Box::new(playlist), tracks));
                     }
-                    Err(error) => report(&messages, error),
+                    Err(error) => report(&messages, "could not open that playlist", error),
                 }
             });
         }
@@ -514,7 +531,7 @@ fn start_playback(
                             }
                         }
                     }
-                    Err(error) => report(&messages, error),
+                    Err(error) => report(&messages, "could not start the browser check", error),
                 }
             }
             Err(error) => {
@@ -561,8 +578,16 @@ fn push_sync(
                 let _ = messages.send(Message::SignedOut);
             }
             Err(error) => {
-                let _ = messages.send(Message::SyncRejected(fields));
-                report(&messages, error);
+                let reason = secrets::redact(&error.to_string());
+                tracing::warn!(
+                    reason,
+                    "the account service would not take the library changes"
+                );
+                let _ = messages.send(Message::SyncRejected {
+                    fields,
+                    reason,
+                    temporary: error.is_temporary(),
+                });
             }
         }
     });
@@ -570,16 +595,33 @@ fn push_sync(
 
 fn restore_account(services: Arc<Services>, token: String, messages: UnboundedSender<Message>) {
     tokio::spawn(async move {
-        match services.auth.me(&token).await {
-            Ok(user) => {
-                let _ = messages.send(Message::SignedIn(Box::new(user)));
-                load_sync(&services, &token, &messages).await;
+        let mut wait = RESTORE_PAUSE;
+        for attempt in 1..=RESTORE_ATTEMPTS {
+            match services.auth.me(&token).await {
+                Ok(user) => {
+                    let _ = messages.send(Message::SignedIn(Box::new(user)));
+                    load_sync(&services, &token, &messages).await;
+                    return;
+                }
+                Err(ApiError::Unauthorized) => {
+                    services.secrets.clear(SESSION_TOKEN);
+                    let _ = messages.send(Message::SignedOut);
+                    return;
+                }
+                Err(error) if error.is_temporary() && attempt < RESTORE_ATTEMPTS => {
+                    tracing::warn!(
+                        attempt,
+                        reason = secrets::redact(&error.to_string()),
+                        "the account service did not answer, asking again"
+                    );
+                    tokio::time::sleep(wait).await;
+                    wait *= 2;
+                }
+                Err(error) => {
+                    report(&messages, "could not reach the account service", error);
+                    return;
+                }
             }
-            Err(ApiError::Unauthorized) => {
-                services.secrets.clear(SESSION_TOKEN);
-                let _ = messages.send(Message::SignedOut);
-            }
-            Err(error) => report(&messages, error),
         }
     });
 }
@@ -589,12 +631,14 @@ async fn load_sync(services: &Arc<Services>, token: &str, messages: &UnboundedSe
         Ok(document) => {
             let _ = messages.send(Message::Sync(Box::new(document)));
         }
-        Err(error) => report(messages, error),
+        Err(error) => report(messages, "could not load your saved library", error),
     }
 }
 
-fn report(messages: &UnboundedSender<Message>, error: ApiError) {
-    let _ = messages.send(Message::Failure(secrets::redact(&error.to_string())));
+fn report(messages: &UnboundedSender<Message>, doing: &str, error: ApiError) {
+    let reason = secrets::redact(&error.to_string());
+    tracing::warn!(doing, reason, "a background request failed");
+    let _ = messages.send(Message::Failure(format!("{doing}: {reason}")));
 }
 
 #[derive(serde::Deserialize)]

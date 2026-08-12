@@ -157,7 +157,11 @@ pub enum Message {
     TrackDetails(Vec<Track>),
     Radio(Vec<Track>),
     Sync(Box<SyncDocument>),
-    SyncRejected(Vec<SyncField>),
+    SyncRejected {
+        fields: Vec<SyncField>,
+        reason: String,
+        temporary: bool,
+    },
     SignedIn(Box<User>),
     SignInFailed(String),
     SignedOut,
@@ -209,6 +213,7 @@ pub struct App {
     asked_about: HashSet<u64>,
     pub verification_error: Option<String>,
     pub syncing: bool,
+    pub sync_stalled: bool,
     pub quit: bool,
     pub confirming_sign_out: bool,
     radio_seed: Option<String>,
@@ -247,6 +252,7 @@ impl App {
             verification_url: None,
             verification_error: None,
             syncing: false,
+            sync_stalled: false,
             quit: false,
             confirming_sign_out: false,
             radio_seed: None,
@@ -821,12 +827,17 @@ impl App {
             (self.help_scroll as i32 + delta as i32).clamp(0, furthest as i32) as u16;
     }
 
+    pub fn slash_means_search(&self) -> bool {
+        self.tab == Tab::Search && self.stack.is_empty()
+    }
+
     pub fn submit_search(&mut self) -> Vec<Effect> {
         let query = self.search_input.trim().to_string();
         self.focus = Focus::Browsing;
         if query.is_empty() {
             return Vec::new();
         }
+        self.filter.clear();
         self.tab = Tab::Search;
         self.stack.clear();
         self.cursors = vec![0];
@@ -874,13 +885,27 @@ impl App {
             }
             Message::Sync(document) => {
                 self.syncing = false;
+                self.sync_stalled = false;
                 self.library.merge_remote(*document);
                 self.move_cursor(0);
-                Vec::new()
+                if self.library.dirty_fields().is_empty() {
+                    return Vec::new();
+                }
+                vec![Effect::PushSync]
             }
-            Message::SyncRejected(fields) => {
+            Message::SyncRejected {
+                fields,
+                reason,
+                temporary,
+            } => {
                 self.syncing = false;
+                self.sync_stalled = true;
                 self.library.mark_dirty(&fields);
+                if !temporary {
+                    self.status = Some(format!(
+                        "the account service refused your changes: {reason}"
+                    ));
+                }
                 Vec::new()
             }
             Message::SignedIn(user) => {
@@ -900,6 +925,7 @@ impl App {
             Message::SignedOut => {
                 self.user = None;
                 self.library = Library::default();
+                self.sync_stalled = false;
                 self.queue.clear();
                 self.now = NowPlaying::default();
                 self.focus = Focus::Login;
@@ -975,8 +1001,10 @@ impl App {
                 if stay {
                     self.status = Some(if self.refusals >= GIVE_UP_AFTER {
                         format!("stopped after {GIVE_UP_AFTER} tracks in a row would not play")
-                    } else {
+                    } else if refused.is_empty() {
                         reason
+                    } else {
+                        format!("{refused} would not play: {reason}")
                     });
                     self.now = NowPlaying::default();
                     return Vec::new();

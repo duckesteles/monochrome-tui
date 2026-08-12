@@ -58,6 +58,30 @@ fn broke(reason: &str) -> Message {
     }
 }
 
+fn rejected(
+    fields: Vec<monochrome_core::library::SyncField>,
+    reason: &str,
+    temporary: bool,
+) -> Message {
+    Message::SyncRejected {
+        fields,
+        reason: reason.into(),
+        temporary,
+    }
+}
+
+fn pending_changes(app: &mut App) -> Vec<monochrome_core::library::SyncField> {
+    app.push(Screen::Album(album(1, vec![track(1)])));
+    app.cursor_to_start();
+    app.toggle_favorite();
+    let sent = app.library.take_dirty();
+    let fields: Vec<_> = sent.iter().map(|(field, _)| *field).collect();
+    assert!(!fields.is_empty(), "the test needs something to sync");
+    app.pop();
+    app.status = None;
+    fields
+}
+
 fn album(id: u64, tracks: Vec<Track>) -> Album {
     Album {
         id,
@@ -302,7 +326,10 @@ fn a_playback_failure_moves_on_to_the_next_track() {
     app.open_selected();
     app.apply(Message::PlaybackFinished);
     let effects = app.apply(refused("no source"));
-    assert_eq!(app.status.as_deref(), Some("no source"));
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Song 2 would not play: no source")
+    );
     assert!(effects.is_empty());
 }
 
@@ -320,7 +347,10 @@ fn a_track_the_listener_picked_is_never_silently_replaced_by_another() {
         "picking a track and getting a different one is worse than getting nothing"
     );
     assert!(app.now.track.is_none());
-    assert_eq!(app.status.as_deref(), Some("no source"));
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Song 1 would not play: no source")
+    );
 }
 
 #[test]
@@ -393,6 +423,21 @@ fn the_filter_reaches_inside_a_playlist_and_an_artist_page_too() {
         rows.iter()
             .all(|row| matches!(row, Row::Track(track) if track.id == 9)),
         "{rows:?}"
+    );
+}
+
+#[test]
+fn a_new_search_starts_without_an_old_filter_hidden_behind_it() {
+    let mut app = app();
+    app.push(Screen::Album(album(1, vec![track(1), track(2)])));
+    app.filter = "song 2".into();
+    assert_eq!(app.rows().len(), 1, "the filter narrows the album");
+
+    app.search_input = "ahmet kaya".into();
+    app.submit_search();
+    assert!(
+        app.filter.is_empty(),
+        "a filter the search results ignore must not be left lying in wait"
     );
 }
 
@@ -510,7 +555,7 @@ fn a_sync_the_server_refused_is_kept_rather_than_thrown_away() {
     let sent = app.library.take_dirty();
     let fields: Vec<_> = sent.iter().map(|(field, _)| *field).collect();
     assert!(!fields.is_empty());
-    app.apply(Message::SyncRejected(fields));
+    app.apply(rejected(fields, "server returned 503", true));
 
     assert!(
         !app.library.dirty_fields().is_empty(),
@@ -521,6 +566,96 @@ fn a_sync_the_server_refused_is_kept_rather_than_thrown_away() {
     assert!(
         app.library.is_favorite(FavoriteKind::Track, "1"),
         "the server's older copy overwrote a change that was never delivered"
+    );
+}
+
+#[test]
+fn a_sync_that_can_be_tried_again_stays_out_of_the_now_playing_line() {
+    let mut app = app();
+    let fields = pending_changes(&mut app);
+
+    app.apply(rejected(fields, "server returned 503", true));
+
+    assert_eq!(
+        app.status, None,
+        "a hiccup the client will retry on its own must not take over the line \
+         that says what is playing"
+    );
+    assert!(
+        app.sync_stalled,
+        "the line still has to admit the changes are not saved yet"
+    );
+}
+
+#[test]
+fn a_sync_the_server_will_never_take_says_so_in_words() {
+    let mut app = app();
+    let fields = pending_changes(&mut app);
+
+    app.apply(rejected(fields, "server returned 422", false));
+
+    let status = app.status.clone().expect("a refusal has to be reported");
+    assert!(
+        status.contains("account service") && status.contains("422"),
+        "the message has to say what refused and why, got {status:?}"
+    );
+}
+
+#[test]
+fn changes_left_over_from_a_previous_run_are_sent_once_the_server_answers() {
+    let mut app = app();
+    let fields = pending_changes(&mut app);
+    app.library.mark_dirty(&fields);
+
+    let effects = app.apply(Message::Sync(Box::default()));
+
+    assert!(
+        effects.contains(&Effect::PushSync),
+        "a change that outlived the last run has nothing else to trigger it, got {effects:?}"
+    );
+    assert!(
+        app.library.is_favorite(FavoriteKind::Track, "1"),
+        "the server's copy must not overwrite what was never delivered"
+    );
+}
+
+#[test]
+fn a_sync_with_nothing_left_pending_does_not_ask_for_another() {
+    let mut app = app();
+    let effects = app.apply(Message::Sync(Box::default()));
+    assert!(
+        effects.is_empty(),
+        "syncing in a loop would hammer the account service, got {effects:?}"
+    );
+}
+
+#[test]
+fn a_sync_that_finally_lands_clears_the_waiting_mark() {
+    let mut app = app();
+    let fields = pending_changes(&mut app);
+    app.apply(rejected(fields, "server returned 503", true));
+    assert!(app.sync_stalled);
+
+    app.apply(Message::Sync(Box::default()));
+    assert!(
+        !app.sync_stalled,
+        "once the changes are delivered there is nothing left waiting"
+    );
+}
+
+#[test]
+fn a_track_that_will_not_play_is_named_alongside_the_reason() {
+    let mut app = app();
+    app.push(Screen::Album(album(1, vec![track(1)])));
+    app.cursor_to_start();
+    app.open_selected();
+
+    app.apply(broke("server returned 503"));
+
+    let status = app.status.clone().expect("a refusal has to be reported");
+    assert!(
+        status.contains("Song 1") && status.contains("503"),
+        "a bare status code leaves the listener guessing what it belongs to, got {status:?}"
     );
 }
 
@@ -1173,7 +1308,11 @@ fn a_service_having_a_bad_minute_does_not_hand_you_someone_elses_song() {
         2,
         "the queue must stay where the listener left it"
     );
-    assert_eq!(app.status.as_deref(), Some("server returned 503"));
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Sardunyaya Ağıt would not play: server returned 503"),
+        "a bare status code is what left the listener guessing in the first place"
+    );
 }
 
 #[test]
@@ -1187,7 +1326,10 @@ fn a_track_the_service_really_does_not_have_is_skipped_and_said_out_loud() {
 
     let effects = app.apply(refused("not found"));
     assert!(effects.is_empty(), "there is nothing after the last track");
-    assert_eq!(app.status.as_deref(), Some("not found"));
+    assert_eq!(
+        app.status.as_deref(),
+        Some("Song 2 would not play: not found")
+    );
 }
 
 #[test]

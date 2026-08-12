@@ -1,4 +1,4 @@
-use crate::app::{App, Effect, Focus, LoginField, Tab};
+use crate::app::{App, Effect, Focus, LoginField};
 use crate::input::{self, Action};
 use crossterm::event::KeyEvent;
 
@@ -108,7 +108,7 @@ pub fn on_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
             Vec::new()
         }
         Action::FocusSearch => {
-            app.focus = if app.tab == Tab::Search && app.stack.is_empty() {
+            app.focus = if app.slash_means_search() {
                 Focus::SearchInput
             } else {
                 Focus::FilterInput

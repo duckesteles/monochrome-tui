@@ -395,6 +395,27 @@ async fn only_changed_fields_are_pushed() {
         .expect("push");
 }
 
+#[tokio::test]
+async fn an_account_service_that_is_down_is_something_to_come_back_to() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/sync"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    let client = AuthClient::new(server.uri()).expect("client");
+    let error = client
+        .push_sync("token", &[(SyncField::History, json!([]))])
+        .await
+        .expect_err("a 503 is not a delivery");
+
+    assert!(
+        error.is_temporary(),
+        "an outage must be waited out, not reported as a change the server refused: {error}"
+    );
+}
+
 fn sample_track() -> Track {
     Track {
         id: 1,
