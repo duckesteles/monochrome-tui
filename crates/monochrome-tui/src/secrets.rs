@@ -50,13 +50,16 @@ impl Secrets {
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
+        if let Some(secret) = self.read_fallback(key) {
+            return Some(secret);
+        }
         let (reply, answer) = std::sync::mpsc::channel();
         if self.dispatch(Request::Get(key.to_string(), reply))
             && let Ok(Some(secret)) = answer.recv_timeout(self.patience)
         {
             return Some(secret);
         }
-        self.read_fallback(key)
+        None
     }
 
     pub fn set(&self, key: &str, value: &str) -> Result<()> {
@@ -237,6 +240,31 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "a locked keyring must not hold the whole client, waited {:?}",
             started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_secret_the_keyring_kept_from_before_never_outranks_a_newer_one() {
+        let scratch = Scratch::new("older");
+        let store = Secrets::with_worker(
+            scratch.file("credentials"),
+            Duration::from_secs(1),
+            |requests| {
+                while let Ok(request) = requests.recv() {
+                    if let Request::Get(_, reply) = request {
+                        let _ = reply.send(Some("an older token".into()));
+                    }
+                }
+            },
+        );
+        store
+            .write_fallback("session-token", Some("the newer token"))
+            .expect("write");
+
+        assert_eq!(
+            store.get("session-token").as_deref(),
+            Some("the newer token"),
+            "the file is only ever written when the keyring refused, so it is the newer of the two"
         );
     }
 

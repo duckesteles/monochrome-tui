@@ -82,8 +82,6 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let _guard = setup_logging(&paths.log_dir, args.verbose)?;
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -102,6 +100,8 @@ fn main() -> Result<()> {
     if let Some(query) = args.play {
         return runtime.block_on(monochrome_tui::diagnostics::play_once(paths, query));
     }
+
+    let _guard = setup_logging(&paths.log_dir, args.verbose)?;
     runtime.block_on(run(paths))
 }
 
