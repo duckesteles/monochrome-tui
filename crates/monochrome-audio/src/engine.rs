@@ -302,7 +302,10 @@ struct Playback {
     resampler: LinearResampler,
     finished: bool,
     failed: bool,
+    unreadable_in_a_row: u32,
 }
+
+const GIVE_UP_AFTER_UNREADABLE: u32 = 64;
 
 fn apply_level(output: &mut [f32], level: f32) {
     for sample in output.iter_mut() {
@@ -425,6 +428,7 @@ fn prepare(stream: MediaSourceStream<'static>, hint: Hint) -> Result<Playback, S
         resampler: LinearResampler::new(source_rate, source_rate, source_channels),
         finished: false,
         failed: false,
+        unreadable_in_a_row: 0,
     })
 }
 
@@ -726,8 +730,19 @@ fn decode_block<'a>(
     };
 
     let decoded = match playback.decoder.decode(&packet) {
-        Ok(decoded) => decoded,
+        Ok(decoded) => {
+            playback.unreadable_in_a_row = 0;
+            decoded
+        }
         Err(SymphoniaError::DecodeError(_)) => {
+            playback.unreadable_in_a_row += 1;
+            if playback.unreadable_in_a_row >= GIVE_UP_AFTER_UNREADABLE {
+                return Err(
+                    "this stream stopped decoding part way through, so what reaches the speakers \
+                     would not be the whole track"
+                        .into(),
+                );
+            }
             mapped.clear();
             return Ok(Some(&mapped[..]));
         }
