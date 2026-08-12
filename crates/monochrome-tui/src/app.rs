@@ -888,7 +888,10 @@ impl App {
                 self.sync_stalled = false;
                 self.library.merge_remote(*document);
                 self.move_cursor(0);
-                Vec::new()
+                if self.library.dirty_fields().is_empty() {
+                    return Vec::new();
+                }
+                vec![Effect::PushSync]
             }
             Message::SyncRejected {
                 fields,

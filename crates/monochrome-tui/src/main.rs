@@ -36,7 +36,10 @@ const RESTORE_PAUSE: Duration = Duration::from_secs(2);
     version
 )]
 struct Args {
-    #[arg(long, help = "Write a log file to the state directory")]
+    #[arg(
+        long,
+        help = "Log everything, not only what went wrong, to the state directory"
+    )]
     verbose: bool,
     #[arg(long, help = "Print the resolved file locations and exit")]
     paths: bool,
@@ -79,10 +82,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let _guard = args
-        .verbose
-        .then(|| setup_logging(&paths.log_dir))
-        .transpose()?;
+    let _guard = setup_logging(&paths.log_dir, args.verbose)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -142,7 +142,10 @@ fn uninstall(paths: Paths, assume_yes: bool) -> Result<()> {
     Ok(())
 }
 
-fn setup_logging(dir: &std::path::Path) -> Result<tracing_appender::non_blocking::WorkerGuard> {
+fn setup_logging(
+    dir: &std::path::Path,
+    verbose: bool,
+) -> Result<tracing_appender::non_blocking::WorkerGuard> {
     monochrome_tui::paths::create_private_dir(dir)?;
     monochrome_tui::paths::create_private_file(&dir.join("log"))?;
     let appender = tracing_appender::rolling::never(dir, "log");
@@ -151,8 +154,12 @@ fn setup_logging(dir: &std::path::Path) -> Result<tracing_appender::non_blocking
         .with_writer(writer)
         .with_ansi(false)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "monochrome=debug,info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
+                |_| match verbose {
+                    true => "monochrome=debug,info".into(),
+                    false => "warn".into(),
+                },
+            ),
         )
         .init();
     Ok(guard)
@@ -298,7 +305,8 @@ async fn run(paths: Paths) -> Result<()> {
         }
     }
 
-    if scheduler.take_now() {
+    let anything_undelivered = !app.library.dirty_fields().is_empty();
+    if scheduler.take_now() || anything_undelivered {
         flush_on_exit(&mut app, &services, &paths).await;
     } else {
         save_snapshot(&app, &paths);

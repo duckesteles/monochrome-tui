@@ -602,6 +602,34 @@ fn a_sync_the_server_will_never_take_says_so_in_words() {
 }
 
 #[test]
+fn changes_left_over_from_a_previous_run_are_sent_once_the_server_answers() {
+    let mut app = app();
+    let fields = pending_changes(&mut app);
+    app.library.mark_dirty(&fields);
+
+    let effects = app.apply(Message::Sync(Box::default()));
+
+    assert!(
+        effects.contains(&Effect::PushSync),
+        "a change that outlived the last run has nothing else to trigger it, got {effects:?}"
+    );
+    assert!(
+        app.library.is_favorite(FavoriteKind::Track, "1"),
+        "the server's copy must not overwrite what was never delivered"
+    );
+}
+
+#[test]
+fn a_sync_with_nothing_left_pending_does_not_ask_for_another() {
+    let mut app = app();
+    let effects = app.apply(Message::Sync(Box::default()));
+    assert!(
+        effects.is_empty(),
+        "syncing in a loop would hammer the account service, got {effects:?}"
+    );
+}
+
+#[test]
 fn a_sync_that_finally_lands_clears_the_waiting_mark() {
     let mut app = app();
     let fields = pending_changes(&mut app);
