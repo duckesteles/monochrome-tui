@@ -503,6 +503,7 @@ pub async fn play_once(paths: Paths, query: String) -> Result<()> {
             replay_gain,
             peak,
             decryption_key: handle.decryption_key,
+            expected_duration: (track.duration > 0).then_some(track.duration as f64),
         });
 
         let mut started = false;

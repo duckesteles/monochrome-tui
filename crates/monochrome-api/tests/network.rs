@@ -1053,3 +1053,168 @@ async fn a_search_section_that_fails_alone_does_not_sink_the_whole_query() {
     assert!(results.artists.is_empty());
     assert!(results.playlists.is_empty());
 }
+
+#[tokio::test]
+async fn every_credited_artist_is_named_in_the_lookup() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
+        .and(query_param("track", "Sardunyaya Ağıt"))
+        .and(query_param("artist", "Fazil Say, Serenad Bağcan"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([{
+            "kind": "audio",
+            "delivery": "direct",
+            "source": "mono",
+            "url": "https://cdn.example/audio.flac"
+        }]))))
+        .mount(&server)
+        .await;
+
+    let mut track = sample_track();
+    track.title = "Sardunyaya Ağıt".into();
+    track.artist = Some(ArtistRef {
+        id: 1,
+        name: "Fazil Say".into(),
+        picture: None,
+    });
+    track.artists = vec![
+        ArtistRef {
+            id: 1,
+            name: "Fazil Say".into(),
+            picture: None,
+        },
+        ArtistRef {
+            id: 2,
+            name: "Serenad Bağcan".into(),
+            picture: None,
+        },
+    ];
+
+    let resolver = playback_resolver(&server);
+    resolver.cache_jwt("a-session".into());
+    resolver
+        .resolve(&track, Quality::Lossless)
+        .await
+        .expect("naming only the first artist invites a different recording");
+}
+
+#[tokio::test]
+async fn a_track_with_a_version_asks_for_that_version() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
+        .and(query_param("track", "Çav Bella (Live)"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([{
+            "kind": "audio",
+            "delivery": "direct",
+            "source": "mono",
+            "url": "https://cdn.example/audio.flac"
+        }]))))
+        .mount(&server)
+        .await;
+
+    let mut track = sample_track();
+    track.title = "Çav Bella".into();
+    track.version = Some("Live".into());
+
+    let resolver = playback_resolver(&server);
+    resolver.cache_jwt("a-session".into());
+    resolver
+        .resolve(&track, Quality::Lossless)
+        .await
+        .expect("a live take and a studio take are not the same recording");
+}
+
+#[tokio::test]
+async fn a_track_with_no_artist_at_all_names_none_rather_than_inventing_one() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
+        .and(wiremock::matchers::query_param_is_missing("artist"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([{
+            "kind": "audio",
+            "delivery": "direct",
+            "source": "mono",
+            "url": "https://cdn.example/audio.flac"
+        }]))))
+        .mount(&server)
+        .await;
+
+    let mut track = sample_track();
+    track.artist = None;
+    track.artists = Vec::new();
+
+    let resolver = playback_resolver(&server);
+    resolver.cache_jwt("a-session".into());
+    resolver
+        .resolve(&track, Quality::Lossless)
+        .await
+        .expect("searching for an artist called Unknown Artist finds the wrong song");
+}
+
+#[tokio::test]
+async fn a_service_that_stumbles_once_is_asked_again_before_giving_up() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([{
+            "kind": "audio",
+            "delivery": "direct",
+            "source": "mono",
+            "url": "https://cdn.example/audio.flac"
+        }]))))
+        .mount(&server)
+        .await;
+
+    let resolver = playback_resolver(&server);
+    resolver.cache_jwt("a-session".into());
+    let handle = resolver
+        .resolve(&sample_track(), Quality::Lossless)
+        .await
+        .expect("one bad minute on the service should not cost the listener the track");
+    assert_eq!(handle.url, "https://cdn.example/audio.flac");
+}
+
+#[tokio::test]
+async fn a_service_that_keeps_failing_is_not_asked_forever() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let resolver = playback_resolver(&server);
+    resolver.cache_jwt("a-session".into());
+    let error = resolver
+        .resolve(&sample_track(), Quality::Lossless)
+        .await
+        .expect_err("a service that is down stays down");
+    assert!(!monochrome_api::stream::worth_moving_on(&error));
+}
+
+#[tokio::test]
+async fn a_track_the_service_does_not_have_is_worth_moving_on_from() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/track/"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let resolver = playback_resolver(&server);
+    resolver.cache_jwt("a-session".into());
+    let error = resolver
+        .resolve(&sample_track(), Quality::Lossless)
+        .await
+        .expect_err("nothing to play");
+    assert!(monochrome_api::stream::worth_moving_on(&error));
+}

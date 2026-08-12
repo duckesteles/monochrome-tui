@@ -18,6 +18,19 @@ pub const RETIRED_PLAYBACK_URLS: &[&str] = &[
 
 const JWT_LIFETIME: Duration = Duration::from_secs(55 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const RETRY_PAUSE: Duration = Duration::from_millis(400);
+
+pub fn worth_another_try(error: &ApiError) -> bool {
+    match error {
+        ApiError::Network(_) => true,
+        ApiError::Status { code, .. } => *code >= 500,
+        _ => false,
+    }
+}
+
+pub fn worth_moving_on(error: &ApiError) -> bool {
+    matches!(error, ApiError::NotFound | ApiError::NoSourceEnabled)
+}
 
 pub fn is_retired_playback_url(url: &str) -> bool {
     RETIRED_PLAYBACK_URLS.contains(&url.trim().trim_end_matches('/'))
@@ -403,14 +416,14 @@ impl StreamResolver {
             .header("Referer", format!("{WEB_ORIGIN}/"))
             .bearer_auth(self.playback_token())
             .query(&[
-                ("track", track.title.trim()),
+                ("track", track.display_title().trim()),
                 ("intent", "stream"),
                 ("quality", quality.as_unified()),
             ]);
 
-        let artist = track.artist_name().trim();
+        let artist = track.every_artist();
         if !artist.is_empty() {
-            request = request.query(&[("artist", artist)]);
+            request = request.query(&[("artist", artist.as_str())]);
         }
         let album = track.album_title().trim();
         if !album.is_empty() {
@@ -443,6 +456,17 @@ impl StreamResolver {
             return Err(ApiError::TurnstileRequired);
         }
 
+        match self.ask_for_playback(track, quality).await {
+            Err(error) if worth_another_try(&error) => {
+                tracing::debug!(%error, "the playback service stumbled, asking once more");
+                tokio::time::sleep(RETRY_PAUSE).await;
+                self.ask_for_playback(track, quality).await
+            }
+            other => other,
+        }
+    }
+
+    async fn ask_for_playback(&self, track: &Track, quality: Quality) -> ApiResult<String> {
         let response = self.playback_request(track, quality).send().await?;
         let status = response.status();
         let body = response.text().await.unwrap_or_default();

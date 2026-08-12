@@ -26,6 +26,21 @@ pub struct PlayRequest {
     pub replay_gain: Option<f32>,
     pub peak: Option<f32>,
     pub decryption_key: Option<String>,
+    pub expected_duration: Option<f64>,
+}
+
+const LENGTH_SLACK_SECONDS: f64 = 5.0;
+const LENGTH_SLACK_FRACTION: f64 = 0.05;
+
+pub fn is_the_wrong_recording(expected: Option<f64>, got: Option<f64>) -> bool {
+    let (Some(expected), Some(got)) = (expected, got) else {
+        return false;
+    };
+    if !(expected.is_finite() && got.is_finite()) || expected <= 0.0 || got <= 0.0 {
+        return false;
+    }
+    let slack = LENGTH_SLACK_SECONDS.max(expected * LENGTH_SLACK_FRACTION);
+    (expected - got).abs() > slack
 }
 
 #[derive(Debug)]
@@ -341,6 +356,14 @@ fn open(request: &PlayRequest) -> Result<Playback, String> {
     prepare(stream, hint)
 }
 
+fn length(seconds: Option<f64>) -> String {
+    let Some(seconds) = seconds else {
+        return "an unmeasured".into();
+    };
+    let whole = seconds.round().max(0.0) as u64;
+    format!("{}:{:02}", whole / 60, whole % 60)
+}
+
 fn unreadable(error: SymphoniaError) -> String {
     if let SymphoniaError::IoError(io) = &error
         && io.kind() != std::io::ErrorKind::UnexpectedEof
@@ -457,6 +480,17 @@ fn serve(commands: Receiver<Command>, events: Sender<Event>, shared: Arc<Shared>
                             continue;
                         }
                     };
+
+                    if is_the_wrong_recording(request.expected_duration, opened.duration) {
+                        let _ = events.send(Event::Failed(format!(
+                            "the source sent a {} recording where this track is {}, so it is not \
+                             the same performance",
+                            length(opened.duration),
+                            length(request.expected_duration)
+                        )));
+                        playback = None;
+                        continue;
+                    }
 
                     let device = match output.take() {
                         Some(device) => Ok(device),
@@ -802,6 +836,27 @@ mod tests {
     }
 
     #[test]
+    fn a_recording_of_the_right_length_is_accepted() {
+        assert!(!is_the_wrong_recording(Some(185.0), Some(184.6)));
+        assert!(!is_the_wrong_recording(Some(185.0), Some(189.0)));
+        assert!(!is_the_wrong_recording(Some(600.0), Some(620.0)));
+    }
+
+    #[test]
+    fn a_recording_of_quite_another_length_is_not_the_same_performance() {
+        assert!(is_the_wrong_recording(Some(102.0), Some(163.0)));
+        assert!(is_the_wrong_recording(Some(185.0), Some(240.0)));
+    }
+
+    #[test]
+    fn a_length_nobody_measured_is_never_used_to_refuse_a_track() {
+        assert!(!is_the_wrong_recording(None, Some(240.0)));
+        assert!(!is_the_wrong_recording(Some(185.0), None));
+        assert!(!is_the_wrong_recording(Some(0.0), Some(240.0)));
+        assert!(!is_the_wrong_recording(Some(f64::NAN), Some(240.0)));
+    }
+
+    #[test]
     fn volume_is_clamped_into_range() {
         let (player, _events) = Player::spawn();
         player.set_volume(4.0);
@@ -821,6 +876,7 @@ mod tests {
             replay_gain: None,
             peak: None,
             decryption_key: None,
+            expected_duration: None,
         });
         let mut saw_failure = false;
         let deadline = std::time::Instant::now() + Duration::from_secs(20);

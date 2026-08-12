@@ -474,6 +474,7 @@ fn start_playback(
                     replay_gain,
                     peak,
                     decryption_key: handle.decryption_key,
+                    expected_duration: (track.duration > 0).then_some(track.duration as f64),
                 });
             }
             Err(ApiError::CredentialRejected) => {
@@ -517,7 +518,10 @@ fn start_playback(
                 }
             }
             Err(error) => {
-                let _ = messages.send(Message::PlaybackFailed(secrets::redact(&error.to_string())));
+                let _ = messages.send(Message::PlaybackFailed {
+                    worth_moving_on: monochrome_api::stream::worth_moving_on(&error),
+                    reason: secrets::redact(&error.to_string()),
+                });
             }
         }
     });
@@ -679,9 +683,10 @@ fn forward_audio_events(
                     monochrome_audio::Event::Finished => Message::PlaybackFinished,
                     monochrome_audio::Event::Output { .. } => continue,
                     monochrome_audio::Event::Stopped => continue,
-                    monochrome_audio::Event::Failed(reason) => {
-                        Message::PlaybackFailed(secrets::redact(&reason))
-                    }
+                    monochrome_audio::Event::Failed(reason) => Message::PlaybackFailed {
+                        reason: secrets::redact(&reason),
+                        worth_moving_on: false,
+                    },
                 };
                 if messages.send(message).is_err() {
                     break;
