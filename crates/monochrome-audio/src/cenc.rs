@@ -28,7 +28,7 @@ pub fn parse_key(hex: &str) -> Option<[u8; 16]> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Sample {
     size: usize,
-    iv: [u8; 16],
+    iv: Option<[u8; 16]>,
 }
 
 pub struct FlacFromCenc<R: Read> {
@@ -163,8 +163,10 @@ impl<R: Read> FlacFromCenc<R> {
 
         match self.fill(size)? {
             Some(mut data) => {
-                let mut cipher = Cipher::new(&self.key.into(), &sample.iv.into());
-                cipher.apply_keystream(&mut data);
+                if let Some(iv) = sample.iv {
+                    let mut cipher = Cipher::new(&self.key.into(), &iv.into());
+                    cipher.apply_keystream(&mut data);
+                }
                 self.out.extend(data);
                 self.mdat_remaining -= size as u64;
             }
@@ -197,7 +199,7 @@ impl<R: Read> FlacFromCenc<R> {
         for (index, size) in sizes.into_iter().enumerate() {
             self.samples.push_back(Sample {
                 size,
-                iv: ivs.get(index).copied().unwrap_or([0u8; 16]),
+                iv: ivs.get(index).copied(),
             });
         }
     }
@@ -597,6 +599,37 @@ mod tests {
         file
     }
 
+    fn fragment(samples: &[Vec<u8>], ivs: Option<&[[u8; 8]]>) -> Vec<u8> {
+        let sizes: Vec<usize> = samples.iter().map(Vec::len).collect();
+        let mut traf = mp4_box(b"tfhd", &[0u8; 8]);
+        traf.extend(trun(&sizes));
+        if let Some(ivs) = ivs {
+            traf.extend(senc(ivs));
+        }
+        let traf = mp4_box(b"traf", &traf);
+
+        let mut out = mp4_box(b"moof", &traf);
+        let mut mdat = Vec::new();
+        for (index, sample) in samples.iter().enumerate() {
+            match ivs.and_then(|ivs| ivs.get(index)) {
+                Some(iv) => mdat.extend(encrypt(&key(), iv, sample)),
+                None => mdat.extend_from_slice(sample),
+            }
+        }
+        out.extend(mp4_box(b"mdat", &mdat));
+        out
+    }
+
+    fn stream_of(fragments: Vec<Vec<u8>>) -> Vec<u8> {
+        let mut file = mp4_box(b"ftyp", b"mp41iso8");
+        file.extend(moov_with_dfla());
+        file.extend(mp4_box(b"sidx", &[0u8; 12]));
+        for fragment in fragments {
+            file.extend(fragment);
+        }
+        file
+    }
+
     fn run(stream: &[u8]) -> Vec<u8> {
         let mut reader = FlacFromCenc::new(std::io::Cursor::new(stream.to_vec()), key());
         let mut out = Vec::new();
@@ -829,5 +862,40 @@ mod tests {
         let reader = FlacFromCenc::new(std::io::Cursor::new(Vec::new()), key());
         assert!(!reader.is_seekable());
         assert_eq!(reader.byte_len(), None);
+    }
+
+    #[test]
+    fn a_fragment_that_carries_no_ivs_is_in_the_clear_and_is_left_alone() {
+        let opening: Vec<u8> = (0..96u8).collect();
+        let stream = stream_of(vec![fragment(std::slice::from_ref(&opening), None)]);
+
+        let out = run(&stream);
+        let audio = &out[4 + flac_blocks().len()..];
+        assert_eq!(
+            audio,
+            &opening[..],
+            "a fragment with no senc is not encrypted, and running the cipher over it destroys the \
+             opening of the track"
+        );
+    }
+
+    #[test]
+    fn a_clear_opening_followed_by_encrypted_music_comes_back_whole() {
+        let opening: Vec<u8> = (0..64u8).collect();
+        let rest: Vec<u8> = (100..180u8).collect();
+        let stream = stream_of(vec![
+            fragment(std::slice::from_ref(&opening), None),
+            fragment(std::slice::from_ref(&rest), Some(&[[7u8; 8]])),
+        ]);
+
+        let out = run(&stream);
+        let audio = &out[4 + flac_blocks().len()..];
+        let mut whole = opening.clone();
+        whole.extend_from_slice(&rest);
+        assert_eq!(
+            audio,
+            &whole[..],
+            "the track must start where it starts, not at the first encrypted fragment"
+        );
     }
 }
