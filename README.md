@@ -8,6 +8,18 @@ account you already use on the web and listen from your terminal.
 ```sh
 curl -fsSL https://raw.githubusercontent.com/duckesteles/monochrome-tui/main/install.sh | sh
 ```
+Ensure `~/.local/bin` is in your `PATH` if it is not already:
+
+```sh
+# bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+
+# zsh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+
+# fish
+fish_add_path ~/.local/bin
+```
 
 Then run `monochrome`.
 
