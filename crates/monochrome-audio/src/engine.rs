@@ -1027,7 +1027,7 @@ mod decode_tests {
         assert_eq!(playback.source_channels, 1);
         let samples = drain(&mut playback, 2);
         assert_eq!(samples.len(), 128);
-        for pair in samples.chunks_exact(2) {
+        for pair in samples.as_chunks::<2>().0 {
             assert_eq!(pair[0], pair[1]);
         }
     }
